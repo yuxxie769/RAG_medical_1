@@ -1,0 +1,17 @@
+{
+  "ingest_run_id": "4232c65685394fd2b94b3ea074654137",
+  "source_path": "tests/sample_data.jsonl",
+  "raw_batch_id": null,
+  "clean_batch_id": "clean_001",
+  "kb_batch_id": null,
+  "raw_count": 10,
+  "cleaned_count": 11,
+  "document_count": 11,
+  "resume_from_line": 1,
+  "last_source_line_no": 10,
+  "skipped_batches": 0,
+  "failed_batches": 0,
+  "flush_to_milvus": true,
+  "force_reingest": false,
+  "status": "finished"
+}

@@ -1,0 +1,1 @@
+"""RAG medical application package."""

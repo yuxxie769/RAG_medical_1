@@ -1,0 +1,1 @@
+{"ingest_run_id": "4232c65685394fd2b94b3ea074654137", "source_path": "tests/sample_data.jsonl", "raw_count": 10, "cleaned_count": 11, "document_count": 11, "skipped_batches": 0, "failed_batches": 0, "resume_from_line": 1, "last_source_line_no": 10, "status": "finished"}

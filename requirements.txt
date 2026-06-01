@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pydantic
+python-dotenv
+numpy
+pandas
+openai
+pymilvus==3.0.0
+pytest
