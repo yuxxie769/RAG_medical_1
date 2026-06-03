@@ -1,0 +1,187 @@
+<div id="app-shell">
+<main class="page-shell {% if not service_available %}is-unavailable{% endif %}">
+  <div class="page-backdrop"></div>
+  <div class="page-pattern page-pattern-left"></div>
+  <div class="page-pattern page-pattern-right"></div>
+
+  <section class="app-frame">
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">RAG Medical</p>
+        <h1>医疗问答工作台</h1>
+      </div>
+      <div class="header-status">
+        {% if service_available %}
+          <span class="status-dot"></span>
+          <span>会话服务在线</span>
+        {% else %}
+          <span class="status-dot status-dot-offline"></span>
+          <span>会话服务不可用</span>
+        {% endif %}
+      </div>
+    </header>
+
+    {% if not service_available %}
+      <section class="service-state">
+        <h2>当前无法进入问答功能</h2>
+        <p>{{ service_error or "MongoDB 会话服务暂时不可用，请稍后再试。" }}</p>
+      </section>
+    {% else %}
+      <section class="chat-layout">
+        <aside class="chat-sidebar">
+          <div class="sidebar-card profile-card">
+            <div>
+              <p class="card-label">当前身份</p>
+              <strong>{{ profile.nickname if profile else "未设置昵称" }}</strong>
+            </div>
+            {% if profile %}
+              <p class="muted-text">当前设备匿名保存会话记录</p>
+            {% endif %}
+          </div>
+
+          <div class="sidebar-card conversation-card">
+            <div class="card-row">
+              <div>
+                <p class="card-label">会话</p>
+                <strong>历史记录</strong>
+              </div>
+              {% if profile %}
+                <button
+                  class="secondary-button"
+                  type="button"
+                  hx-post="/ui/conversations"
+                  hx-target="#app-shell"
+                  hx-swap="outerHTML"
+                >
+                  新建会话
+                </button>
+              {% endif %}
+            </div>
+
+            <div class="conversation-list">
+              {% for conversation in conversations %}
+                <button
+                  class="conversation-item {% if active_conversation and active_conversation.conversation_id == conversation.conversation_id %}is-active{% endif %}"
+                  hx-get="/ui/conversations/{{ conversation.conversation_id }}"
+                  hx-target="#app-shell"
+                  hx-swap="outerHTML"
+                >
+                  <span class="conversation-title">{{ conversation.title }}</span>
+                  <span class="conversation-time">{{ conversation.last_message_at.strftime("%m-%d %H:%M") if conversation.last_message_at else "" }}</span>
+                </button>
+              {% endfor %}
+            </div>
+          </div>
+        </aside>
+
+        <section class="chat-main">
+          <div class="main-card answer-card">
+            {% if active_conversation %}
+              <div class="card-row answer-card-head">
+                <div>
+                  <p class="card-label">当前会话</p>
+                  <strong>{{ active_conversation.title }}</strong>
+                </div>
+                <label class="topk-control" for="top-k-select">
+                  <span>答案参考量</span>
+                  <select id="top-k-select" name="top_k" form="ask-form">
+                    {% for option in top_k_options %}
+                      <option value="{{ option }}" {% if top_k == option %}selected{% endif %}>{{ option }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+              </div>
+
+              <div class="message-stream" data-message-stream>
+                {% if messages %}
+                  {% for message in messages %}
+                    {% include "fragments/message.html" %}
+                  {% endfor %}
+                {% else %}
+                  <div class="welcome-card">
+                    <p class="eyebrow">开始提问</p>
+                    <h2>把问题交给系统，回答会附带检索依据。</h2>
+                    <p>适合先从症状解释、就医建议、常见健康知识问题开始。</p>
+                  </div>
+                {% endif %}
+              </div>
+
+              <form
+                id="ask-form"
+                class="ask-form"
+                method="post"
+                action="/ui/conversations/{{ active_conversation.conversation_id }}/ask"
+                hx-post="/ui/conversations/{{ active_conversation.conversation_id }}/ask"
+                hx-target="#app-shell"
+                hx-swap="outerHTML"
+              >
+                <label class="question-input-wrap">
+                  <span class="sr-only">输入问题</span>
+                  <textarea
+                    name="query"
+                    rows="3"
+                    placeholder="请输入你的健康问题，例如：最近总是口干，需要注意什么？"
+                  >{{ question_value }}</textarea>
+                </label>
+                <div class="form-footer">
+                  <div class="form-hints">
+                    <span>默认使用混合检索</span>
+                    <span>回答会附带引用依据</span>
+                  </div>
+                  <button class="primary-button" type="submit">开始问答</button>
+                </div>
+                <div class="request-loading" data-request-loading>
+                  <span class="loading-mark"></span>
+                  <span>正在生成回答，请稍等...</span>
+                </div>
+                {% if question_error %}
+                  <p class="inline-error">{{ question_error }}</p>
+                {% endif %}
+              </form>
+            {% endif %}
+          </div>
+        </section>
+
+        <aside class="chat-detail">
+          <div class="main-card detail-card">
+            <div class="card-row">
+              <div>
+                <p class="card-label">引用详情</p>
+                <strong>回答依据</strong>
+              </div>
+              <button class="detail-close" type="button" data-close-citation>关闭</button>
+            </div>
+            <div id="citation-detail" class="citation-detail">
+              {% include "fragments/citation_detail.html" %}
+            </div>
+          </div>
+        </aside>
+      </section>
+    {% endif %}
+  </section>
+
+  {% if service_available and not profile %}
+    <div class="modal-backdrop">
+      <section class="profile-modal">
+        <p class="eyebrow">首次进入</p>
+        <h2>先给自己起个昵称</h2>
+        <p>系统会用它在当前设备保存你的多轮会话和引用记录。</p>
+        <form
+          class="profile-form"
+          method="post"
+          action="/ui/profile"
+          hx-post="/ui/profile"
+          hx-target="#app-shell"
+          hx-swap="outerHTML"
+        >
+          <input type="text" name="nickname" placeholder="例如：小林 / 研究员A" maxlength="24" />
+          <button class="primary-button" type="submit">进入问答页</button>
+          {% if profile_error %}
+            <p class="inline-error">{{ profile_error }}</p>
+          {% endif %}
+        </form>
+      </section>
+    </div>
+  {% endif %}
+</main>
+</div>

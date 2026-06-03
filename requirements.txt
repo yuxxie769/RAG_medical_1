@@ -2,6 +2,8 @@ fastapi
 uvicorn
 pydantic
 python-dotenv
+jinja2
+python-multipart
 numpy
 pandas
 openai

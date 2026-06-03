@@ -1,0 +1,28 @@
+<article class="message-bubble message-{{ message.role }}">
+  <div class="message-meta">
+    <span>{{ "你" if message.role == "user" else "系统回答" }}</span>
+    <span>{{ message.created_at.strftime("%H:%M") if message.created_at else "" }}</span>
+  </div>
+
+  {% if message.role == "assistant" and message.fallback %}
+    <div class="fallback-banner">谨慎回答：当前资料不足或服务暂时不可用，以下内容仅作保守参考。</div>
+  {% endif %}
+
+  <div class="message-content">{{ render_message_content(message, active_conversation) }}</div>
+
+  {% if message.role == "assistant" and message.citations %}
+    <div class="citation-list">
+      {% for citation in message.citations %}
+        <button
+          class="citation-chip"
+          hx-get="/ui/conversations/{{ active_conversation.conversation_id }}/messages/{{ message.message_id }}/citations/{{ loop.index0 }}"
+          hx-target="#citation-detail"
+          hx-swap="innerHTML"
+        >
+          <span>依据 {{ loop.index }}</span>
+          <small>{{ citation.doc_id }}</small>
+        </button>
+      {% endfor %}
+    </div>
+  {% endif %}
+</article>

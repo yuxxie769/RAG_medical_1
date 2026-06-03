@@ -10,6 +10,7 @@
 - 融合召回后的可插拔 rerank
 - LLM 生成回答
 - MongoDB 导入状态、断点续跑、审计与进度跟踪
+- Web 问答页、多会话历史记录与引用回看
 
 ---
 
@@ -132,6 +133,31 @@ This layer owns:
 - cancellation flags
 - stage and progress metrics
 
+### 2.7 Chat state layer
+
+Modules under `app/chat` use MongoDB to persist anonymous profile state, conversation threads, and assistant answer history.
+
+This layer owns:
+
+- anonymous browser user identity by `user_token`
+- nickname persistence
+- multi-conversation thread lifecycle
+- per-message history
+- citation persistence for assistant answers
+- conversation ordering by recent activity
+
+Current interaction pattern:
+
+```text
+browser cookie user_token
+-> load profile
+-> load conversation list
+-> load active conversation messages
+-> submit question
+-> call /answer
+-> persist user message + assistant message + citations
+```
+
 ---
 
 ## 3. Storage Design
@@ -169,7 +195,7 @@ Milvus write semantics are idempotent by stable `doc_id`:
 - only missing docs are inserted
 - post-write verification confirms expected `doc_id`s exist
 
-### 3.2 MongoDB
+### 3.2 MongoDB ingest collections
 
 MongoDB stores ingest execution state and audit records.
 
@@ -198,6 +224,72 @@ MongoDB stores ingest execution state and audit records.
 - batch succeeded / failed / skipped
 - cancel requested
 - circuit breaker opened
+
+### 3.3 MongoDB chat collections
+
+MongoDB also stores question-answer history for the web chat experience.
+
+`chat_profiles` includes:
+
+- `user_token`
+- `nickname`
+- `created_at`
+- `updated_at`
+
+Purpose:
+
+- identify the current anonymous browser user
+- keep a stable nickname on the same device
+
+`chat_conversations` includes:
+
+- `conversation_id`
+- `user_token`
+- `title`
+- `created_at`
+- `updated_at`
+- `last_message_at`
+
+Purpose:
+
+- represent one chat thread
+- support multiple conversations per anonymous user
+- drive sidebar sorting by most recent activity
+
+`chat_messages` includes:
+
+- `message_id`
+- `conversation_id`
+- `role`
+- `content`
+- `fallback`
+- `citations`
+- `created_at`
+
+Purpose:
+
+- persist both user questions and assistant answers
+- keep answer fallback state
+- keep assistant citations so the UI can reopen evidence later without re-querying
+
+Current storage behavior:
+
+- one browser gets one `user_token` cookie
+- one `user_token` can own multiple conversations
+- first nickname setup creates a default conversation
+- first real question updates the default conversation title
+- every ask persists two messages:
+  - user message
+  - assistant message
+- assistant message stores the final answer plus the exact citation payload returned by `/answer`
+
+Current indexes:
+
+- `chat_profiles.user_token` unique
+- `chat_conversations.conversation_id` unique
+- `chat_conversations(user_token, last_message_at)`
+- `chat_messages.message_id` unique
+- `chat_messages(conversation_id, created_at)`
 
 ---
 

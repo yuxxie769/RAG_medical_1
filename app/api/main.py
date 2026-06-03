@@ -8,6 +8,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.chat import ChatRepository, ChatService
 from app.config.settings import settings
 from app.core.logging import get_logger
 from app.core.models import RetrievalResult
@@ -37,6 +38,8 @@ _DATASTORE = {
     "retriever": None,
     "ingest_repository": None,
     "ingest_service": None,
+    "chat_repository": None,
+    "chat_service": None,
 }
 
 
@@ -238,6 +241,22 @@ def _get_ingest_service() -> IngestService:
             batch_size=settings.batch_size,
         )
     return _DATASTORE["ingest_service"]
+
+
+def _get_chat_repository() -> ChatRepository:
+    if _DATASTORE["chat_repository"] is None:
+        _DATASTORE["chat_repository"] = ChatRepository(
+            uri=settings.mongodb_uri,
+            database=settings.mongodb_database,
+            connect_timeout_ms=settings.mongodb_connect_timeout_ms,
+        )
+    return _DATASTORE["chat_repository"]
+
+
+def _get_chat_service() -> ChatService:
+    if _DATASTORE["chat_service"] is None:
+        _DATASTORE["chat_service"] = ChatService(repository=_get_chat_repository())
+    return _DATASTORE["chat_service"]
 
 
 def _ensure_indexed_store() -> MilvusStore:
@@ -455,3 +474,9 @@ def answer_query(request: AnswerRequest) -> AnswerResponse:
             for item in citations
         ],
     )
+
+
+from app.web import mount_web
+
+
+mount_web(app)

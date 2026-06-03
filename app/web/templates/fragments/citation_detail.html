@@ -1,0 +1,31 @@
+{% if citation %}
+  <article class="citation-panel">
+    <div class="citation-panel-head">
+      <span class="eyebrow">引用依据</span>
+      <h3>{{ citation.doc_id }}</h3>
+    </div>
+
+    <dl class="citation-metadata">
+      {% if citation.metadata %}
+        {% if citation.metadata.source_line_no %}
+          <div>
+            <dt>源行号</dt>
+            <dd>{{ citation.metadata.source_line_no }}</dd>
+          </div>
+        {% endif %}
+      {% endif %}
+    </dl>
+
+    <div class="citation-content">{{ citation.content }}</div>
+  </article>
+{% elif citation_error %}
+  <div class="detail-empty">
+    <p class="eyebrow">无法显示引用</p>
+    <p>{{ citation_error }}</p>
+  </div>
+{% else %}
+  <div class="detail-empty">
+    <p class="eyebrow">等待选择</p>
+    <p>点击回答下方的引用卡片，在这里查看完整依据和元信息。</p>
+  </div>
+{% endif %}

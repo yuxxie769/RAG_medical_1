@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ project_name }}</title>
+    <link rel="stylesheet" href="{{ request.url_for('web-static', path='css/app.css') }}?v=4" />
+  </head>
+  <body>
+    {% block body %}{% endblock %}
+    <script src="{{ request.url_for('web-static', path='js/chat.js') }}?v=4"></script>
+  </body>
+</html>
