@@ -96,6 +96,38 @@ from app.retrieval import OpenAICompatibleEmbedder
 
 `search_method` 支持 `hybrid`、`dense` 和 `sparse`。其中 dense 使用 `COSINE`，sparse 使用 Milvus BM25 Function，hybrid 使用 `RRFRanker(k=60)`。
 
+## Rerank 阶段
+
+当前检索链路支持一个可插拔的 rerank 阶段，位置在融合召回之后、最终截断 `top_k` 之前。
+
+默认关闭，可通过环境变量开启：
+
+```text
+ENABLE_RERANK=true
+RERANK_PROVIDER=openai_compatible
+RERANK_API_KEY=...
+RERANK_BASE_URL=https://your-endpoint.example.com
+RERANK_PATH=/rerank
+RERANK_MODEL_NAME=...
+RERANK_TIMEOUT_SECONDS=10
+RERANK_CANDIDATE_LIMIT=15
+```
+
+当前内置两个 provider：
+
+- `none`
+- `openai_compatible`
+
+rerank 会对 `dense`、`sparse`、`hybrid` 三种检索模式统一生效。  
+如果 rerank 服务超时、429、额度不足或返回异常，请求会自动降级回原始召回顺序，不会让 `/query` 或 `/answer` 失败。
+
+响应中的每个命中会在 `metadata` 中补充：
+
+- `retrieval_score`
+- `rerank_score`
+- `rerank_applied`
+- `rerank_provider`
+
 重建 collection 时运行：
 
 ```bash
@@ -106,3 +138,24 @@ python scripts/reset_milvus_collection.py --confirm-drop
 
 ## 下一步
 继续补充生成安全策略和完整评估流程。
+
+## MongoDB 导入状态与断点续跑
+
+导入状态和审计事件已迁移到 MongoDB，运行时不再读取或写入 `logs/ingest*` 文件。
+
+- `ingest_runs`：保存导入任务、租约、汇总统计和连续成功断点。
+- `ingest_batches`：保存行区间级批次状态。失败批次会保留缺口，不阻断后续批次。
+- `ingest_events`：保存任务和批次审计事件。
+
+再次调用 `POST /ingest` 时，服务会自动跳过成功批次并重试失败批次。`force_reingest=true`
+会创建新的导入任务。MongoDB 不可用时导入接口返回 `503`，避免产生无法追踪的 Milvus 写入。
+
+## 导入断点续跑文档
+
+完整说明见 [docs/ingest_resume.md](C:/Users/xieyuxiang/Documents/RAG_medical/docs/ingest_resume.md)。
+
+当前 `POST /ingest` 已改为异步 `202 Accepted`。导入创建后可用：
+
+- `GET /ingest/status?ingest_run_id=...` 查看状态与速率指标
+- `GET /ingest/{ingest_run_id}/events` 通过 SSE 订阅实时进度
+- `DELETE /ingest/{ingest_run_id}` 请求取消当前导入

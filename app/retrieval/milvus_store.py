@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Sequence
+from typing import Any, Callable, Dict, List, Literal, Sequence
 
 from pymilvus import AnnSearchRequest, DataType, Function, FunctionType, MilvusClient, RRFRanker
+from pymilvus.exceptions import MilvusException
 
 from app.core.models import Document, RetrievalResult
 
 
 SearchMethod = Literal["hybrid", "dense", "sparse"]
+
+
+class MilvusOperationError(RuntimeError):
+    """Raised when a Milvus request fails or exceeds its timeout."""
 
 
 @dataclass
@@ -19,6 +24,12 @@ class MilvusRecord:
     question: str
     answer: str
     metadata: Dict[str, Any]
+
+
+@dataclass
+class MilvusUpsertResult:
+    inserted_count: int
+    existing_count: int
 
 
 @dataclass
@@ -52,16 +63,37 @@ class MilvusStore:
         schema: MilvusCollectionSchema,
         host: str = "localhost",
         port: int = 19530,
+        request_timeout_seconds: float = 3.0,
+        management_timeout_seconds: float = 10.0,
     ):
         self.schema = schema
         self.host = host
         self.port = port
+        self.request_timeout_seconds = request_timeout_seconds
+        self.management_timeout_seconds = management_timeout_seconds
         self.client: MilvusClient | None = None
 
     def connect(self) -> MilvusClient:
         if self.client is None:
-            self.client = MilvusClient(uri=f"http://{self.host}:{self.port}")
+            self.client = MilvusClient(
+                uri=f"http://{self.host}:{self.port}",
+                timeout=max(self.request_timeout_seconds, self.management_timeout_seconds),
+            )
         return self.client
+
+    def _call_milvus(
+        self,
+        operation: str,
+        method: Callable[..., Any],
+        timeout: float,
+        **kwargs,
+    ) -> Any:
+        try:
+            return method(timeout=timeout, **kwargs)
+        except (MilvusException, TimeoutError, OSError) as exc:
+            raise MilvusOperationError(
+                f"Milvus {operation} failed or timed out after {timeout:.1f}s: {exc}"
+            ) from exc
 
     def _build_schema(self):
         schema = MilvusClient.create_schema(auto_id=False, enable_dynamic_field=False)
@@ -124,7 +156,12 @@ class MilvusStore:
 
     def _validate_existing_schema(self) -> None:
         client = self.connect()
-        description = client.describe_collection(collection_name=self.schema.collection_name)
+        description = self._call_milvus(
+            "describe_collection",
+            client.describe_collection,
+            timeout=self.management_timeout_seconds,
+            collection_name=self.schema.collection_name,
+        )
         field_names = {field["name"] for field in description.get("fields", [])}
         required_fields = {
             self.schema.primary_field_name,
@@ -152,36 +189,56 @@ class MilvusStore:
 
     def create_collection(self) -> None:
         client = self.connect()
-        if client.has_collection(collection_name=self.schema.collection_name):
+        if self._call_milvus(
+            "has_collection",
+            client.has_collection,
+            timeout=self.management_timeout_seconds,
+            collection_name=self.schema.collection_name,
+        ):
             self._validate_existing_schema()
-            client.load_collection(collection_name=self.schema.collection_name)
+            self._call_milvus(
+                "load_collection",
+                client.load_collection,
+                timeout=self.management_timeout_seconds,
+                collection_name=self.schema.collection_name,
+            )
             return
 
-        client.create_collection(
+        self._call_milvus(
+            "create_collection",
+            client.create_collection,
+            timeout=self.management_timeout_seconds,
             collection_name=self.schema.collection_name,
             schema=self._build_schema(),
             index_params=self._build_index_params(),
         )
-        client.load_collection(collection_name=self.schema.collection_name)
+        self._call_milvus(
+            "load_collection",
+            client.load_collection,
+            timeout=self.management_timeout_seconds,
+            collection_name=self.schema.collection_name,
+        )
 
     def _existing_doc_ids(self, doc_ids: Sequence[str]) -> set[str]:
         if not doc_ids:
             return set()
         self.create_collection()
-        rows = self.connect().query(
+        rows = self._call_milvus(
+            "query",
+            self.connect().query,
+            timeout=self.request_timeout_seconds,
             collection_name=self.schema.collection_name,
             filter=f'{self.schema.primary_field_name} in [{", ".join(repr(doc_id) for doc_id in doc_ids)}]',
             output_fields=[self.schema.primary_field_name],
         )
         return {str(row[self.schema.primary_field_name]) for row in rows}
 
-    def upsert(self, records: Sequence[MilvusRecord]) -> None:
+    def upsert(self, records: Sequence[MilvusRecord]) -> MilvusUpsertResult:
         if not records:
-            return
+            return MilvusUpsertResult(inserted_count=0, existing_count=0)
         self.create_collection()
         existing_doc_ids = self._existing_doc_ids([record.doc_id for record in records])
-        if existing_doc_ids:
-            raise ValueError(f"Duplicate doc_id exists in Milvus: {sorted(existing_doc_ids)}")
+        missing_records = [record for record in records if record.doc_id not in existing_doc_ids]
 
         rows = [
             {
@@ -199,11 +256,21 @@ class MilvusStore:
                 "kb_batch_id": str(record.metadata.get("kb_batch_id", "unknown")),
                 "kb_index": int(record.metadata.get("kb_index") or 0),
             }
-            for record in records
+            for record in missing_records
         ]
-        client = self.connect()
-        client.insert(collection_name=self.schema.collection_name, data=rows)
-        client.flush(collection_name=self.schema.collection_name)
+        if rows:
+            client = self.connect()
+            self._call_milvus(
+                "insert",
+                client.insert,
+                timeout=self.request_timeout_seconds,
+                collection_name=self.schema.collection_name,
+                data=rows,
+            )
+        return MilvusUpsertResult(
+            inserted_count=len(missing_records),
+            existing_count=len(existing_doc_ids),
+        )
 
     def search(
         self,
@@ -223,7 +290,10 @@ class MilvusStore:
         if search_method == "dense":
             if query_vector is None:
                 raise ValueError("Dense search requires a query vector.")
-            results = client.search(
+            results = self._call_milvus(
+                "dense_search",
+                client.search,
+                timeout=self.request_timeout_seconds,
                 collection_name=self.schema.collection_name,
                 data=[query_vector],
                 anns_field=self.schema.vector_field_name,
@@ -234,7 +304,10 @@ class MilvusStore:
         elif search_method == "sparse":
             if not query_text:
                 raise ValueError("Sparse search requires query text.")
-            results = client.search(
+            results = self._call_milvus(
+                "sparse_search",
+                client.search,
+                timeout=self.request_timeout_seconds,
                 collection_name=self.schema.collection_name,
                 data=[query_text],
                 anns_field=self.schema.sparse_vector_field_name,
@@ -245,7 +318,10 @@ class MilvusStore:
         elif search_method == "hybrid":
             if query_vector is None or not query_text:
                 raise ValueError("Hybrid search requires both a query vector and query text.")
-            results = client.hybrid_search(
+            results = self._call_milvus(
+                "hybrid_search",
+                client.hybrid_search,
+                timeout=self.request_timeout_seconds,
                 collection_name=self.schema.collection_name,
                 reqs=[
                     AnnSearchRequest(
@@ -269,6 +345,24 @@ class MilvusStore:
             raise ValueError(f"Unsupported search method: {search_method}")
 
         return self._to_retrieval_results(results)
+
+    def flush(self) -> None:
+        self.create_collection()
+        self._call_milvus(
+            "flush",
+            self.connect().flush,
+            timeout=self.management_timeout_seconds,
+            collection_name=self.schema.collection_name,
+        )
+
+    def verify_persisted_doc_ids(self, doc_ids: Sequence[str]) -> None:
+        expected_doc_ids = {doc_id for doc_id in doc_ids if doc_id}
+        if not expected_doc_ids:
+            return
+        persisted_doc_ids = self._existing_doc_ids(list(expected_doc_ids))
+        missing_doc_ids = expected_doc_ids - persisted_doc_ids
+        if missing_doc_ids:
+            raise RuntimeError(f"Milvus write verification failed for doc_ids: {sorted(missing_doc_ids)}")
 
     def _to_retrieval_results(self, results: List[List[dict]]) -> List[RetrievalResult]:
         hits: List[RetrievalResult] = []
@@ -295,12 +389,28 @@ class MilvusStore:
             return
         self.create_collection()
         client = self.connect()
-        client.delete(collection_name=self.schema.collection_name, ids=list(doc_ids))
-        client.flush(collection_name=self.schema.collection_name)
+        self._call_milvus(
+            "delete",
+            client.delete,
+            timeout=self.request_timeout_seconds,
+            collection_name=self.schema.collection_name,
+            ids=list(doc_ids),
+        )
+        self._call_milvus(
+            "flush",
+            client.flush,
+            timeout=self.management_timeout_seconds,
+            collection_name=self.schema.collection_name,
+        )
 
     def count(self) -> int:
         self.create_collection()
-        stats = self.connect().get_collection_stats(collection_name=self.schema.collection_name)
+        stats = self._call_milvus(
+            "get_collection_stats",
+            self.connect().get_collection_stats,
+            timeout=self.request_timeout_seconds,
+            collection_name=self.schema.collection_name,
+        )
         return int(stats.get("row_count", 0))
 
 
@@ -317,11 +427,26 @@ class InMemoryMilvusStore(MilvusStore):
     def create_collection(self) -> None:
         return None
 
-    def upsert(self, records: Sequence[MilvusRecord]) -> None:
+    def _existing_doc_ids(self, doc_ids: Sequence[str]) -> set[str]:
+        return {doc_id for doc_id in doc_ids if doc_id in self._records}
+
+    def upsert(self, records: Sequence[MilvusRecord]) -> MilvusUpsertResult:
+        existing_doc_ids = self._existing_doc_ids([record.doc_id for record in records])
         for record in records:
-            if record.doc_id in self._records:
-                raise ValueError(f"Duplicate doc_id exists in memory store: {record.doc_id}")
-            self._records[record.doc_id] = record
+            if record.doc_id not in existing_doc_ids:
+                self._records[record.doc_id] = record
+        return MilvusUpsertResult(
+            inserted_count=len(records) - len(existing_doc_ids),
+            existing_count=len(existing_doc_ids),
+        )
+
+    def flush(self) -> None:
+        return None
+
+    def verify_persisted_doc_ids(self, doc_ids: Sequence[str]) -> None:
+        missing_doc_ids = set(doc_ids) - set(self._records)
+        if missing_doc_ids:
+            raise RuntimeError(f"Milvus write verification failed for doc_ids: {sorted(missing_doc_ids)}")
 
     def search(
         self,
@@ -359,6 +484,10 @@ class InMemoryMilvusStore(MilvusStore):
 
 
 def build_records(documents: Sequence[Document], vectors: Sequence[List[float]]) -> List[MilvusRecord]:
+    if len(documents) != len(vectors):
+        raise ValueError(
+            f"Embedding count mismatch: expected {len(documents)} vectors, got {len(vectors)}"
+        )
     records: List[MilvusRecord] = []
     for doc, vector in zip(documents, vectors):
         records.append(

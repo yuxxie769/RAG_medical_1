@@ -23,6 +23,7 @@ def _split_answer(answer: str) -> List[tuple[str, int, int]]:
         return [(answer, 0, len(answer))]
 
     chunks: List[tuple[str, int, int]] = []
+    # 遍历answer，每次步长为ANSWER_CHUNK_STEP，截取长度为ANSWER_CHUNK_SIZE的子串
     for start in range(0, len(answer), ANSWER_CHUNK_STEP):
         end = min(start + ANSWER_CHUNK_SIZE, len(answer))
         chunks.append((answer[start:end], start, end))
