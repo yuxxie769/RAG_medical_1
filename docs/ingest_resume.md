@@ -591,7 +591,108 @@ DELETE /ingest/{ingest_run_id}
 
 日志不会写入问答正文，只记录定位和排障需要的运行信息。
 
-## 15. 熔断补充说明
+## 15. 2026-06 中断恢复与租约状态补充
+
+这一轮改动主要解决的是“worker 中途异常退出后，run 长时间停留在 `running` / `cancelling`，管理台和调用方很难判断任务到底还活不活”的问题。
+
+### 15.1 新增 `interrupted` 状态
+
+`interrupted` 表示：
+
+- 上一次执行没有正常收尾
+- 当前没有有效执行者继续持有这条 run
+- 这条任务现在可以重新恢复，也可以直接取消
+
+它和 `failed` 的区别是：
+
+- `failed`：本轮执行遇到了顶层不可恢复异常，任务已经明确失败
+- `interrupted`：更偏向“执行者失联或服务重启后的遗留运行态”，恢复语义仍然成立
+
+### 15.2 启动时自动收敛遗留运行态
+
+应用启动时，会扫描遗留的：
+
+- `queued`
+- `running`
+- `cancelling`
+
+并且仍然带有 `lease_owner` 的 run，把它们统一收敛成 `interrupted`。
+
+如果日志里看到类似：
+
+```text
+Reconciled 2 orphaned ingest runs into interrupted state
+```
+
+意思是：
+
+- 本次启动自动发现了 2 条遗留运行态任务
+- 它们已经被系统改写成 `interrupted`
+- 这不是报错，而是恢复机制正常生效
+
+### 15.3 读取状态时对 stale / abandoned run 的解释
+
+即使服务还没重启，只要 `GET /ingest/status` 发现：
+
+- 旧状态仍然是 `running` 或 `cancelling`
+- 但 `lease_expires_at` 已经过期
+
+就会把这条 run 按 `interrupted` 语义返回，并额外带上两个辅助标记：
+
+- `stale=true`：说明旧租约已经过期，当前状态属于遗留运行态解释结果
+- `abandoned=true`：说明这条任务很可能是在处理中途失联的
+
+这两个字段主要给管理台、排障脚本和运维接口调用方使用，用来识别“看起来像还在跑、实际上已经没有活 worker”的任务。
+
+### 15.4 对恢复行为的影响
+
+这次改动没有改变原来的批次级断点恢复原则：
+
+- 已成功的 batch 仍然会被跳过
+- `failed` / `pending` 的 batch 仍然会在下一次普通 `/ingest` 时自动补导
+- 同一 `(source_path, collection_name)` 的恢复仍然以 MongoDB 中的 `ingest_batches` 为准
+
+区别在于：
+
+- 以前更依赖“等 lease 自然过期”
+- 现在服务重启后会主动把遗留运行态收敛成 `interrupted`
+- 管理台和调用方能更快看出任务已经中断，而不是继续误判成 `running`
+
+### 15.5 对取消行为的影响
+
+取消接口现在分两种情况：
+
+1. 普通运行中任务  
+   仍然保持协作式取消：
+   - run 先进入 `cancelling`
+   - 等当前批次结束后再进入 `cancelled`
+
+2. 已经 `interrupted` 且没有 `lease_owner` 的任务  
+   可以直接收尾成 `cancelled`，不会再长时间挂在 `cancelling`
+
+这样做的目的，是避免“worker 已死，但 run 永远只停在 `cancelling`”这种半死不活的状态。
+
+### 15.6 现在怎么看一条任务是否还真的活着
+
+排障时不要只看：
+
+- `status=running`
+- `last_scanned_line`
+
+还要一起看：
+
+- 是否还有有效 `lease_owner`
+- `lease_expires_at` 是否已经过期
+- `GET /ingest/status` 返回里是否出现 `stale=true` / `abandoned=true`
+- 批次层面的 `ingest_batches.status`
+
+在当前版本里：
+
+- `running` / `cancelling` 更适合解释为“存在活跃执行者或尚未被收敛”
+- `interrupted` 明确表示“当前没有活跃执行者，但可恢复”
+- 真正可信的恢复依据仍然是批次状态，而不是单个 run 级汇总字段
+
+## 16. 熔断补充说明
 
 当前实际生效的熔断规则比上面的旧描述更简单：
 

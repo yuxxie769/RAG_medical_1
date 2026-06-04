@@ -1,0 +1,38 @@
+<div id="admin-login-shell">
+  <main class="page-shell admin-page-shell">
+    <div class="page-backdrop"></div>
+    <div class="page-pattern page-pattern-left"></div>
+    <div class="page-pattern page-pattern-right"></div>
+
+    <section class="admin-login-frame">
+      <div class="admin-login-intro">
+        <p class="eyebrow">Admin Access</p>
+        <h1>导入管理登录</h1>
+        <p>登录后可以提交导入任务、查看实时进度、取消任务并排查失败批次。</p>
+        <a class="secondary-link" href="/ui">返回问答页</a>
+      </div>
+
+      <section class="admin-login-card">
+        <p class="card-label">管理员认证</p>
+        <strong>请输入账号与密码</strong>
+
+        <form
+          class="profile-form admin-login-form"
+          method="post"
+          action="/ui/admin/login"
+          hx-post="/ui/admin/login"
+          hx-target="#admin-login-shell"
+          hx-swap="outerHTML"
+        >
+          <input type="hidden" name="next" value="{{ next_path }}" />
+          <input type="text" name="username" placeholder="管理员账号" value="{{ username_value }}" autocomplete="username" />
+          <input type="password" name="password" placeholder="管理员密码" autocomplete="current-password" />
+          <button class="primary-button" type="submit">进入导入工作台</button>
+          {% if login_error %}
+            <p class="inline-error">{{ login_error }}</p>
+          {% endif %}
+        </form>
+      </section>
+    </section>
+  </main>
+</div>

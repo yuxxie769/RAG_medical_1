@@ -1,0 +1,146 @@
+<div id="admin-app-shell">
+  <main class="page-shell admin-page-shell">
+    <div class="page-backdrop"></div>
+    <div class="page-pattern page-pattern-left"></div>
+    <div class="page-pattern page-pattern-right"></div>
+
+    <section class="app-frame">
+      <header class="app-header">
+        <div>
+          <p class="eyebrow">RAG Medical</p>
+          <h1>导入管理工作台</h1>
+        </div>
+        <div class="admin-header-actions">
+          <span class="header-status">
+            <span class="status-dot {% if health_state.mongodb_status != 'ok' %}status-dot-offline{% endif %}"></span>
+            <span>MongoDB {{ "在线" if health_state.mongodb_status == "ok" else "不可用" }}</span>
+          </span>
+          <a class="secondary-link" href="/ui">返回问答页</a>
+          <form method="post" action="/ui/admin/logout">
+            <button class="secondary-button" type="submit">退出登录</button>
+          </form>
+        </div>
+      </header>
+
+      <section class="admin-layout">
+        <aside class="chat-sidebar admin-sidebar">
+          <div class="sidebar-card profile-card">
+            <div>
+              <p class="card-label">当前管理员</p>
+              <strong>{{ admin_user.username }}</strong>
+            </div>
+            <p class="muted-text">当前浏览器会话内保持登录，关闭浏览器后需要重新认证。</p>
+          </div>
+
+          <div class="sidebar-card">
+            <p class="card-label">系统状态</p>
+            <strong>{{ project_name }}</strong>
+            <p class="muted-text">MongoDB：{{ "可用" if health_state.mongodb_status == "ok" else "不可用" }}</p>
+            {% if health_state.health_error %}
+              <p class="inline-error">{{ health_state.health_error }}</p>
+            {% endif %}
+          </div>
+        </aside>
+
+        <section class="chat-main admin-main">
+          <div class="main-card admin-form-card">
+            <div class="card-row">
+              <div>
+                <p class="card-label">提交导入</p>
+                <strong>创建新的导入任务</strong>
+              </div>
+            </div>
+
+            <form
+              class="admin-ingest-form"
+              method="post"
+              action="/ui/admin/ingest"
+              hx-post="/ui/admin/ingest"
+              hx-target="#admin-app-shell"
+              hx-swap="outerHTML"
+            >
+              <label class="form-field">
+                <span>数据源路径</span>
+                <input type="text" name="source_path" value="{{ ingest_form_values.source_path }}" placeholder="例如：tests/sample_data.jsonl" />
+              </label>
+
+              <div class="admin-grid">
+                <label class="form-field">
+                  <span>raw_batch_id</span>
+                  <input type="text" name="raw_batch_id" value="{{ ingest_form_values.raw_batch_id }}" />
+                </label>
+                <label class="form-field">
+                  <span>clean_batch_id</span>
+                  <input type="text" name="clean_batch_id" value="{{ ingest_form_values.clean_batch_id }}" />
+                </label>
+                <label class="form-field">
+                  <span>kb_batch_id</span>
+                  <input type="text" name="kb_batch_id" value="{{ ingest_form_values.kb_batch_id }}" />
+                </label>
+              </div>
+
+              <div class="toggle-row">
+                <label class="toggle-field">
+                  <input type="checkbox" name="flush_to_milvus" value="1" {% if ingest_form_values.flush_to_milvus %}checked{% endif %} />
+                  <span>写入 Milvus</span>
+                </label>
+                <label class="toggle-field">
+                  <input type="checkbox" name="force_reingest" value="1" {% if ingest_form_values.force_reingest %}checked{% endif %} />
+                  <span>强制新建 run</span>
+                </label>
+              </div>
+
+              <div class="form-footer">
+                <div class="form-hints">
+                  <span>导入状态由 MongoDB 持久化</span>
+                  <span>运行中任务支持协作式取消</span>
+                </div>
+                <button class="primary-button" type="submit" {% if health_state.mongodb_status != "ok" %}disabled{% endif %}>开始导入</button>
+              </div>
+
+              <div class="request-loading" data-request-loading>
+                <span class="loading-mark"></span>
+                <span>正在提交导入任务...</span>
+              </div>
+
+              {% if ingest_form_error %}
+                <p class="inline-error">{{ ingest_form_error }}</p>
+              {% endif %}
+            </form>
+          </div>
+
+          <div class="main-card admin-form-card">
+            <div class="card-row">
+              <div>
+                <p class="card-label">查询任务</p>
+                <strong>按数据源路径恢复当前进度</strong>
+              </div>
+            </div>
+
+            <form class="admin-ingest-form" method="get" action="/ui/admin/ingest">
+              <label class="form-field">
+                <span>数据源路径</span>
+                <input
+                  type="text"
+                  name="lookup_source_path"
+                  value="{{ lookup_source_path_value }}"
+                  placeholder="输入启动导入时使用的路径"
+                />
+              </label>
+
+              <div class="form-footer">
+                <div class="form-hints">
+                  <span>会优先显示该路径当前仍在运行中的任务</span>
+                  <span>如果当前没有运行中的任务，则返回最近一次任务状态</span>
+                </div>
+                <button class="secondary-button" type="submit">查询状态</button>
+              </div>
+            </form>
+          </div>
+
+          {% include "fragments/admin_ingest_status.html" %}
+        </section>
+      </section>
+    </section>
+  </main>
+</div>

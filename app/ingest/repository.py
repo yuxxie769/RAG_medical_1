@@ -8,8 +8,11 @@ from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
 from pymongo.errors import PyMongoError
 
 
+ACTIVE_RUN_STATUSES = {"queued", "running", "cancelling"}
 TERMINAL_RUN_STATUSES = {"cancelled", "completed", "completed_with_errors", "failed"}
 EXECUTION_OUTCOMES = {"not_started", "processed", "skipped_all"}
+INTERRUPTED_RUN_ERROR = "Worker stopped unexpectedly before the ingest run finished."
+INTERRUPTED_CANCELLED_ERROR = "Cancelled after interrupted run recovery."
 
 
 class MongoUnavailable(RuntimeError):
@@ -63,6 +66,36 @@ class MongoIngestRepository:
         )
         self.events.create_index([("ingest_run_id", ASCENDING), ("created_at", ASCENDING)])
         self._indexes_ready = True
+
+    @staticmethod
+    def _lease_expired(run: dict[str, Any], now: datetime | None = None) -> bool:
+        lease_expires_at = run.get("lease_expires_at")
+        if lease_expires_at is None:
+            return False
+        return lease_expires_at <= (now or _utcnow())
+
+    @classmethod
+    def _is_stale_run(cls, run: dict[str, Any], now: datetime | None = None) -> bool:
+        return run.get("status") in ACTIVE_RUN_STATUSES and cls._lease_expired(run, now)
+
+    @classmethod
+    def _is_abandoned_run(cls, run: dict[str, Any], now: datetime | None = None) -> bool:
+        return run.get("status") in {"running", "cancelling"} and cls._lease_expired(run, now)
+
+    @classmethod
+    def _derive_interrupted_run(cls, run: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+        effective_now = now or _utcnow()
+        derived = dict(run)
+        derived["stale"] = cls._is_stale_run(run, effective_now)
+        derived["abandoned"] = cls._is_abandoned_run(run, effective_now)
+        if derived["stale"]:
+            derived["status"] = "interrupted"
+            derived["stage"] = "abandoned" if derived["abandoned"] else "interrupted"
+            derived["lease_owner"] = None
+            derived["lease_expires_at"] = None
+            derived["finished_at"] = derived.get("finished_at") or effective_now
+            derived["error"] = derived.get("error") or INTERRUPTED_RUN_ERROR
+        return derived
 
     def start_run(
         self,
@@ -224,6 +257,31 @@ class MongoIngestRepository:
             return self.get_status(ingest_run_id)
 
         now = _utcnow()
+        if (
+            run.get("status") == "interrupted"
+            or (self._is_stale_run(run, now) and not run.get("lease_owner"))
+        ):
+            updated = self.runs.find_one_and_update(
+                {"ingest_run_id": ingest_run_id, "lease_owner": None},
+                {
+                    "$set": {
+                        "status": "cancelled",
+                        "stage": "finished",
+                        "error": INTERRUPTED_CANCELLED_ERROR,
+                        "finished_at": now,
+                        "updated_at": now,
+                    },
+                    "$unset": {
+                        "lease_expires_at": "",
+                        "cancel_requested_at": "",
+                    },
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+            if updated is not None:
+                self.add_event(ingest_run_id, "run_cancelled", {"reason": INTERRUPTED_CANCELLED_ERROR})
+                return self._enrich_run_status(updated)
+
         updated = self.runs.find_one_and_update(
             {"ingest_run_id": ingest_run_id},
             {
@@ -489,6 +547,7 @@ class MongoIngestRepository:
         run = self.runs.find_one({"ingest_run_id": ingest_run_id}, {"_id": 0})
         if run is None:
             return None
+        run = self._derive_interrupted_run(run)
         failed = list(
             self.batches.find(
                 {"ingest_run_id": ingest_run_id, "status": "failed"},
@@ -497,6 +556,63 @@ class MongoIngestRepository:
         )
         run["failed_batch_details"] = failed
         return self._enrich_run_status(run)
+
+    def reconcile_interrupted_runs(self) -> int:
+        self.ping()
+        now = _utcnow()
+        orphaned_runs = list(
+            self.runs.find(
+                {
+                    "status": {"$in": list(ACTIVE_RUN_STATUSES)},
+                    "lease_owner": {"$ne": None},
+                },
+                {"_id": 0, "ingest_run_id": 1, "status": 1, "error": 1},
+            )
+        )
+        for run in orphaned_runs:
+            self.runs.update_one(
+                {"ingest_run_id": run["ingest_run_id"]},
+                {
+                    "$set": {
+                        "status": "interrupted",
+                        "stage": "interrupted",
+                        "finished_at": now,
+                        "error": run.get("error") or INTERRUPTED_RUN_ERROR,
+                        "updated_at": now,
+                    },
+                    "$unset": {
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "cancel_requested_at": "",
+                    },
+                },
+            )
+            self.add_event(run["ingest_run_id"], "run_interrupted", {"previous_status": run.get("status")})
+        return len(orphaned_runs)
+
+    def find_latest_run_for_source_path(
+        self,
+        source_path: str,
+        collection_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        self.ping()
+        run_selector = {"source_path": source_path, "collection_name": collection_name}
+        active_run = self.runs.find_one(
+            {**run_selector, "status": {"$nin": list(TERMINAL_RUN_STATUSES)}},
+            {"_id": 0, "ingest_run_id": 1},
+            sort=[("created_at", DESCENDING)],
+        )
+        if active_run is not None:
+            return self.get_status(active_run["ingest_run_id"])
+
+        latest_run = self.runs.find_one(
+            run_selector,
+            {"_id": 0, "ingest_run_id": 1},
+            sort=[("created_at", DESCENDING)],
+        )
+        if latest_run is None:
+            return None
+        return self.get_status(latest_run["ingest_run_id"])
 
     def add_event(self, ingest_run_id: str, event_type: str, payload: dict[str, Any]) -> None:
         self.events.insert_one(

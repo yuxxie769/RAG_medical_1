@@ -1,4 +1,9 @@
 (function () {
+  var adminEventSource = null;
+  var adminEventsUrl = null;
+  var adminStatusUrl = null;
+  var adminRefreshPending = false;
+
   function applySwap(target, html, swap) {
     if (!target) {
       return;
@@ -40,6 +45,103 @@
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  function closeAdminEventSource() {
+    if (adminEventSource) {
+      adminEventSource.close();
+      adminEventSource = null;
+    }
+    adminEventsUrl = null;
+    adminStatusUrl = null;
+    adminRefreshPending = false;
+  }
+
+  function setAdminStatusNotice(message) {
+    var region = document.querySelector("#admin-run-region");
+    if (!region) {
+      return;
+    }
+    var errorNode = region.querySelector(".inline-error");
+    if (errorNode) {
+      errorNode.textContent = message;
+      return;
+    }
+    var card = region.querySelector(".admin-status-card");
+    if (!card) {
+      return;
+    }
+    var notice = document.createElement("p");
+    notice.className = "inline-error";
+    notice.textContent = message;
+    card.appendChild(notice);
+  }
+
+  function refreshAdminRunRegion() {
+    if (adminRefreshPending || !adminStatusUrl) {
+      return;
+    }
+    adminRefreshPending = true;
+    fetch(adminStatusUrl, {
+      method: "GET",
+      credentials: "same-origin",
+      headers: { "HX-Request": "true" }
+    })
+      .then(function (response) {
+        if (response.redirected) {
+          window.location.assign(response.url);
+          return null;
+        }
+        return response.text();
+      })
+      .then(function (html) {
+        if (!html) {
+          return;
+        }
+        var region = document.querySelector("#admin-run-region");
+        applySwap(region, html, "outerHTML");
+        syncAdminRunRegion();
+      })
+      .catch(function () {
+        closeAdminEventSource();
+        setAdminStatusNotice("进度连接已中断或登录已失效，请刷新后重新登录。");
+      })
+      .finally(function () {
+        adminRefreshPending = false;
+      });
+  }
+
+  function syncAdminRunRegion() {
+    var region = document.querySelector("#admin-run-region");
+    if (!region) {
+      closeAdminEventSource();
+      return;
+    }
+
+    var nextEventsUrl = region.dataset.eventsUrl || null;
+    var nextStatusUrl = region.dataset.statusUrl || null;
+    var isTerminal = region.dataset.terminal === "true";
+
+    if (!nextEventsUrl || !nextStatusUrl || isTerminal) {
+      closeAdminEventSource();
+      return;
+    }
+
+    if (adminEventSource && adminEventsUrl === nextEventsUrl && adminStatusUrl === nextStatusUrl) {
+      return;
+    }
+
+    closeAdminEventSource();
+    adminEventsUrl = nextEventsUrl;
+    adminStatusUrl = nextStatusUrl;
+    adminEventSource = new EventSource(adminEventsUrl);
+    adminEventSource.addEventListener("progress", function () {
+      refreshAdminRunRegion();
+    });
+    adminEventSource.addEventListener("error", function () {
+      closeAdminEventSource();
+      setAdminStatusNotice("进度连接已中断或登录已失效，请刷新后重新登录。");
+    });
+  }
+
   function handleSwap(target) {
     if (!target) {
       return;
@@ -51,6 +153,9 @@
     if (target.id === "citation-detail") {
       openCitationPanel();
       scrollViewportToTop();
+    }
+    if (target.id === "admin-app-shell" || target.id === "admin-run-region") {
+      syncAdminRunRegion();
     }
   }
 
@@ -68,11 +173,18 @@
       headers: Object.assign({ "HX-Request": "true" }, options.headers || {})
     })
       .then(function (response) {
+        if (response.redirected) {
+          window.location.assign(response.url);
+          return null;
+        }
         return response.text().then(function (html) {
           return { response: response, html: html };
         });
       })
       .then(function (result) {
+        if (!result) {
+          return;
+        }
         applySwap(target, result.html, swap || "innerHTML");
         handleSwap(findTarget(targetSelector));
       })
@@ -108,16 +220,25 @@
       if (!submit.dataset.originalText) {
         submit.dataset.originalText = submit.textContent;
       }
-      submit.textContent = submit.closest("#ask-form") ? "正在生成..." : "处理中...";
+      if (submit.closest("#ask-form")) {
+        submit.textContent = "正在生成...";
+      } else if (submit.closest(".admin-ingest-form")) {
+        submit.textContent = "正在提交...";
+      } else {
+        submit.textContent = "处理中...";
+      }
     } else if (submit.dataset.originalText) {
       submit.textContent = submit.dataset.originalText;
     }
   }
 
-  document.addEventListener("DOMContentLoaded", scrollMessages);
+  document.addEventListener("DOMContentLoaded", function () {
+    scrollMessages();
+    syncAdminRunRegion();
+  });
 
   document.body.addEventListener("click", function (event) {
-    var remote = event.target.closest("[hx-post], [hx-get]");
+    var remote = event.target.closest("[hx-post], [hx-get], [hx-delete]");
     if (event.target.closest("[data-close-citation]")) {
       closeCitationPanel();
       return;
@@ -137,14 +258,15 @@
     event.preventDefault();
     var hxPost = remote.getAttribute("hx-post");
     var hxGet = remote.getAttribute("hx-get");
-    var url = hxPost || hxGet;
+    var hxDelete = remote.getAttribute("hx-delete");
+    var url = hxPost || hxGet || hxDelete;
     if (!url) {
       return;
     }
 
     performRequest(
       url,
-      { method: hxPost ? "POST" : "GET" },
+      { method: hxPost ? "POST" : hxDelete ? "DELETE" : "GET" },
       remote.getAttribute("hx-target"),
       remote.getAttribute("hx-swap")
     );

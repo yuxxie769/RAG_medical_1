@@ -1,0 +1,141 @@
+<section
+  id="admin-run-region"
+  class="admin-run-region"
+  {% if ingest_state %}
+    data-events-url="{{ ingest_state.events_url }}"
+    data-status-url="{{ ingest_state.status_url }}"
+    data-terminal="{{ 'true' if ingest_state.status not in live_ingest_statuses else 'false' }}"
+  {% else %}
+    data-terminal="true"
+  {% endif %}
+>
+  <div class="main-card admin-status-card">
+    <div class="card-row">
+      <div>
+        <p class="card-label">任务状态</p>
+        <strong>{{ ingest_state.ingest_run_id if ingest_state else "等待任务" }}</strong>
+      </div>
+      {% if ingest_state %}
+        <div class="status-actions">
+          <button
+            class="secondary-button"
+            type="button"
+            hx-get="{{ ingest_state.status_url }}"
+            hx-target="#admin-run-region"
+            hx-swap="outerHTML"
+          >
+            刷新状态
+          </button>
+          {% if ingest_state.status not in terminal_ingest_statuses and not ingest_state.cancel_requested %}
+            <button
+              class="secondary-button danger-button"
+              type="button"
+              hx-delete="{{ ingest_state.cancel_url }}"
+              hx-target="#admin-run-region"
+              hx-swap="outerHTML"
+            >
+              取消任务
+            </button>
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+
+    {% if ingest_status_error %}
+      <p class="inline-error">{{ ingest_status_error }}</p>
+    {% elif ingest_state %}
+      <div class="admin-metrics">
+        <div class="metric-card">
+          <span>状态</span>
+          <strong>{{ ingest_state.status }}</strong>
+        </div>
+        <div class="metric-card">
+          <span>阶段</span>
+          <strong>{{ ingest_state.stage }}</strong>
+        </div>
+        <div class="metric-card">
+          <span>进度</span>
+          <strong>{{ "%.1f"|format(ingest_state.progress_percent) }}%</strong>
+        </div>
+        <div class="metric-card">
+          <span>扫描</span>
+          <strong>{{ ingest_state.current_scanned_line }} / {{ ingest_state.total_lines }}</strong>
+        </div>
+      </div>
+
+      <div class="progress-track" aria-hidden="true">
+        <div class="progress-fill" style="width: {{ ingest_state.progress_percent }}%;"></div>
+      </div>
+
+      <dl class="admin-status-list">
+        <div>
+          <dt>源路径</dt>
+          <dd>{{ ingest_state.source_path }}</dd>
+        </div>
+        <div>
+          <dt>处理批次</dt>
+          <dd>{{ ingest_state.processed_batches }}</dd>
+        </div>
+        <div>
+          <dt>成功 / 待处理 / 失败</dt>
+          <dd>{{ ingest_state.succeeded_batches }} / {{ ingest_state.pending_batches }} / {{ ingest_state.failed_batches }}</dd>
+        </div>
+        <div>
+          <dt>执行结果</dt>
+          <dd>{{ ingest_state.execution_outcome or "-" }}</dd>
+        </div>
+        <div>
+          <dt>速率</dt>
+          <dd>
+            {{ "%.2f"|format(ingest_state.lines_per_second) if ingest_state.lines_per_second is not none else "-" }} 行/秒，
+            {{ "%.2f"|format(ingest_state.batches_per_second) if ingest_state.batches_per_second is not none else "-" }} 批次/秒
+          </dd>
+        </div>
+        <div>
+          <dt>ETA</dt>
+          <dd>{{ "%.1f"|format(ingest_state.eta_seconds) ~ " 秒" if ingest_state.eta_seconds is not none else "-" }}</dd>
+        </div>
+      </dl>
+
+      {% if ingest_state.abandoned %}
+        <p class="muted-text">检测到遗留运行态的过期 lease，任务已中断，可重新发起恢复或直接取消。</p>
+      {% endif %}
+
+      {% if ingest_state.cancel_requested and ingest_state.status not in terminal_ingest_statuses %}
+        <p class="muted-text">已收到取消请求，系统会在当前批次边界协作式结束任务。</p>
+      {% endif %}
+
+      <div class="failed-batch-section">
+        <div class="card-row">
+          <div>
+            <p class="card-label">失败批次</p>
+            <strong>{{ ingest_state.failed_batches }}</strong>
+          </div>
+        </div>
+        {% if ingest_state.failed_batch_details %}
+          <div class="failed-batch-table">
+            {% for batch in ingest_state.failed_batch_details %}
+              <article class="failed-batch-row">
+                <div>
+                  <span class="failed-batch-title">{{ batch.batch_id }}</span>
+                  <small>{{ batch.start_line }} - {{ batch.end_line }}</small>
+                </div>
+                <div>
+                  <small>重试 {{ batch.attempt_count }} 次</small>
+                  <p>{{ batch.error or "未知错误" }}</p>
+                </div>
+              </article>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="detail-empty">当前没有失败批次。</p>
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="detail-empty">
+        <p class="eyebrow">等待导入</p>
+        <p>提交导入任务后，这里会显示实时进度、速率、取消状态和失败批次。</p>
+      </div>
+    {% endif %}
+  </div>
+</section>

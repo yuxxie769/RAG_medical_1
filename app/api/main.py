@@ -4,17 +4,18 @@ import json
 import time
 from typing import Literal
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.admin import ADMIN_COOKIE_NAME, AdminAuthUnavailable, AdminRepository, AdminSessionError, read_admin_session_value
 from app.chat import ChatRepository, ChatService
 from app.config.settings import settings
 from app.core.logging import get_logger
 from app.core.models import RetrievalResult
 from app.generation import Generator
 from app.ingest import IngestLeaseConflict, IngestService, MongoIngestRepository, MongoUnavailable
-from app.ingest.repository import TERMINAL_RUN_STATUSES
+from app.ingest.repository import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES
 from app.retrieval import (
     DummyEmbedder,
     HybridRetriever,
@@ -38,6 +39,7 @@ _DATASTORE = {
     "retriever": None,
     "ingest_repository": None,
     "ingest_service": None,
+    "admin_repository": None,
     "chat_repository": None,
     "chat_service": None,
 }
@@ -74,6 +76,8 @@ class IngestStatusResponse(BaseModel):
     exists: bool
     status: str | None = None
     stage: str | None = None
+    stale: bool = False
+    abandoned: bool = False
     execution_outcome: Literal["not_started", "processed", "skipped_all"] | None = None
     source_path: str | None = None
     raw_count: int = 0
@@ -243,6 +247,16 @@ def _get_ingest_service() -> IngestService:
     return _DATASTORE["ingest_service"]
 
 
+def _get_admin_repository() -> AdminRepository:
+    if _DATASTORE["admin_repository"] is None:
+        _DATASTORE["admin_repository"] = AdminRepository(
+            uri=settings.mongodb_uri,
+            database=settings.mongodb_database,
+            connect_timeout_ms=settings.mongodb_connect_timeout_ms,
+        )
+    return _DATASTORE["admin_repository"]
+
+
 def _get_chat_repository() -> ChatRepository:
     if _DATASTORE["chat_repository"] is None:
         _DATASTORE["chat_repository"] = ChatRepository(
@@ -257,6 +271,54 @@ def _get_chat_service() -> ChatService:
     if _DATASTORE["chat_service"] is None:
         _DATASTORE["chat_service"] = ChatService(repository=_get_chat_repository())
     return _DATASTORE["chat_service"]
+
+
+def _ensure_bootstrap_admin() -> None:
+    if not settings.admin_bootstrap_username.strip() or not settings.admin_bootstrap_password:
+        return
+    try:
+        _get_admin_repository().ensure_bootstrap_admin(
+            settings.admin_bootstrap_username,
+            settings.admin_bootstrap_password,
+        )
+        logger.info("Ensured bootstrap admin user=%s", settings.admin_bootstrap_username.strip())
+    except AdminAuthUnavailable as exc:
+        logger.warning("Skipping bootstrap admin initialization: %s", exc)
+
+
+def _reconcile_interrupted_runs() -> None:
+    try:
+        repository = _get_ingest_repository()
+        reconcile = getattr(repository, "reconcile_interrupted_runs", None)
+        if reconcile is None:
+            return
+        reconciled = reconcile()
+        if reconciled:
+            logger.warning("Reconciled %s orphaned ingest runs into interrupted state", reconciled)
+    except MongoUnavailable as exc:
+        logger.warning("Skipping ingest run reconciliation: %s", exc)
+
+
+def _authenticate_admin_cookie(cookie_value: str | None) -> dict:
+    try:
+        username_normalized = read_admin_session_value(settings.admin_session_secret, cookie_value)
+        admin_user = _get_admin_repository().get_active_user(username_normalized)
+    except AdminSessionError as exc:
+        raise PermissionError(str(exc)) from exc
+    except AdminAuthUnavailable:
+        raise
+    if admin_user is None:
+        raise PermissionError("Admin authentication required.")
+    return admin_user
+
+
+def _require_admin_api(request: Request) -> dict:
+    try:
+        return _authenticate_admin_cookie(request.cookies.get(ADMIN_COOKIE_NAME))
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail="Admin authentication required.") from exc
+    except AdminAuthUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def _ensure_indexed_store() -> MilvusStore:
@@ -278,6 +340,8 @@ def _to_ingest_status_response(state: dict) -> IngestStatusResponse:
         exists=True,
         status=state.get("status"),
         stage=state.get("stage"),
+        stale=bool(state.get("stale", False)),
+        abandoned=bool(state.get("abandoned", False)),
         execution_outcome=state.get("execution_outcome"),
         source_path=state.get("source_path"),
         raw_count=int(state.get("raw_count", 0)),
@@ -318,6 +382,12 @@ def _format_sse(event: str, data: dict | None = None) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+@app.on_event("startup")
+def bootstrap_admin_user() -> None:
+    _ensure_bootstrap_admin()
+    _reconcile_interrupted_runs()
+
+
 @app.get("/health")
 def health_check() -> dict:
     try:
@@ -329,7 +399,11 @@ def health_check() -> dict:
 
 
 @app.post("/ingest", response_model=IngestAcceptedResponse, status_code=202)
-def ingest_data(request: IngestRequest, background_tasks: BackgroundTasks) -> IngestAcceptedResponse:
+def ingest_data(
+    request: IngestRequest,
+    background_tasks: BackgroundTasks,
+    _: dict = Depends(_require_admin_api),
+) -> IngestAcceptedResponse:
     try:
         prepared_run = _get_ingest_service().prepare_ingest(
             **request.model_dump(),
@@ -353,7 +427,7 @@ def ingest_data(request: IngestRequest, background_tasks: BackgroundTasks) -> In
 
 
 @app.get("/ingest/status", response_model=IngestStatusResponse)
-def ingest_status(ingest_run_id: str) -> IngestStatusResponse:
+def ingest_status(ingest_run_id: str, _: dict = Depends(_require_admin_api)) -> IngestStatusResponse:
     try:
         state = _get_ingest_repository().get_status(ingest_run_id)
     except MongoUnavailable as exc:
@@ -364,7 +438,7 @@ def ingest_status(ingest_run_id: str) -> IngestStatusResponse:
 
 
 @app.delete("/ingest/{ingest_run_id}", response_model=IngestStatusResponse)
-def cancel_ingest(ingest_run_id: str) -> IngestStatusResponse:
+def cancel_ingest(ingest_run_id: str, _: dict = Depends(_require_admin_api)) -> IngestStatusResponse:
     try:
         state = _get_ingest_repository().request_cancel(ingest_run_id)
     except MongoUnavailable as exc:
@@ -375,7 +449,7 @@ def cancel_ingest(ingest_run_id: str) -> IngestStatusResponse:
 
 
 @app.get("/ingest/{ingest_run_id}/events")
-def ingest_events(ingest_run_id: str) -> StreamingResponse:
+def ingest_events(ingest_run_id: str, _: dict = Depends(_require_admin_api)) -> StreamingResponse:
     try:
         initial_state = _get_ingest_repository().get_status(ingest_run_id)
     except MongoUnavailable as exc:
@@ -411,7 +485,7 @@ def ingest_events(ingest_run_id: str) -> StreamingResponse:
                 yield _format_sse("progress", status_response.model_dump(mode="json"))
                 last_updated_at = updated_at
                 last_heartbeat = time.monotonic()
-                if status_response.status in TERMINAL_RUN_STATUSES:
+                if status_response.status not in ACTIVE_RUN_STATUSES:
                     break
             elif time.monotonic() - last_heartbeat >= 15:
                 yield ": heartbeat\n\n"

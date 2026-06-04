@@ -2,11 +2,30 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
+from app.admin import ADMIN_COOKIE_NAME, build_admin_session_value
 from app.api import main as api_main
 from app.api.main import app, IngestRequest, QueryHit, QueryRequest, QueryResponse
 from app.core.models import RetrievalResult
 from app.ingest import IngestLeaseConflict, MongoUnavailable
 from app.retrieval import MilvusOperationError
+
+
+class FakeAdminRepository:
+    def __init__(self) -> None:
+        self.user = {"username": "admin", "username_normalized": "admin", "is_active": True}
+
+    def get_active_user(self, username_normalized):
+        if username_normalized == "admin":
+            return self.user
+        return None
+
+
+def _ingest_client(monkeypatch) -> TestClient:
+    monkeypatch.setitem(api_main._DATASTORE, "admin_repository", FakeAdminRepository())
+    monkeypatch.setattr(api_main.settings, "admin_session_secret", "test-admin-secret")
+    client = TestClient(app)
+    client.cookies.set(ADMIN_COOKIE_NAME, build_admin_session_value("test-admin-secret", "admin"))
+    return client
 
 
 def test_query_request_supports_fetch_k_and_min_score():
@@ -51,6 +70,13 @@ def test_ingest_request_can_force_full_reingest_after_collection_reset():
     assert not hasattr(request, "resume_from_line")
 
 
+def test_ingest_requires_admin_authentication():
+    response = TestClient(app).post("/ingest", json={"source_path": "sample.jsonl"})
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Admin authentication required."
+
+
 def test_ingest_returns_202_and_background_urls(monkeypatch):
     class AsyncReadyService:
         def __init__(self):
@@ -70,7 +96,7 @@ def test_ingest_returns_202_and_background_urls(monkeypatch):
     service = AsyncReadyService()
     monkeypatch.setitem(api_main._DATASTORE, "ingest_service", service)
 
-    response = TestClient(app).post("/ingest", json={"source_path": "sample.jsonl"})
+    response = _ingest_client(monkeypatch).post("/ingest", json={"source_path": "sample.jsonl"})
 
     assert response.status_code == 202
     payload = response.json()
@@ -90,7 +116,7 @@ def test_ingest_returns_503_when_mongodb_is_unavailable(monkeypatch):
 
     monkeypatch.setitem(api_main._DATASTORE, "ingest_service", UnavailableService())
 
-    response = TestClient(app).post("/ingest", json={"source_path": "sample.jsonl"})
+    response = _ingest_client(monkeypatch).post("/ingest", json={"source_path": "sample.jsonl"})
 
     assert response.status_code == 503
 
@@ -102,7 +128,7 @@ def test_ingest_returns_409_when_source_lease_is_active(monkeypatch):
 
     monkeypatch.setitem(api_main._DATASTORE, "ingest_service", ConflictingService())
 
-    response = TestClient(app).post("/ingest", json={"source_path": "sample.jsonl"})
+    response = _ingest_client(monkeypatch).post("/ingest", json={"source_path": "sample.jsonl"})
 
     assert response.status_code == 409
 
@@ -114,7 +140,7 @@ def test_cancel_ingest_returns_404_when_run_is_missing(monkeypatch):
 
     monkeypatch.setitem(api_main._DATASTORE, "ingest_repository", MissingRunRepository())
 
-    response = TestClient(app).delete("/ingest/run_missing")
+    response = _ingest_client(monkeypatch).delete("/ingest/run_missing")
 
     assert response.status_code == 404
 
@@ -134,7 +160,7 @@ def test_cancel_ingest_returns_updated_status(monkeypatch):
 
     monkeypatch.setitem(api_main._DATASTORE, "ingest_repository", CancelRepository())
 
-    response = TestClient(app).delete("/ingest/run_1")
+    response = _ingest_client(monkeypatch).delete("/ingest/run_1")
 
     assert response.status_code == 200
     payload = response.json()
@@ -159,7 +185,7 @@ def test_ingest_status_includes_execution_outcome(monkeypatch):
 
     monkeypatch.setitem(api_main._DATASTORE, "ingest_repository", StatusRepository())
 
-    response = TestClient(app).get("/ingest/status", params={"ingest_run_id": "run_1"})
+    response = _ingest_client(monkeypatch).get("/ingest/status", params={"ingest_run_id": "run_1"})
 
     assert response.status_code == 200
     payload = response.json()
@@ -194,7 +220,7 @@ def test_ingest_events_stream_progress_until_terminal_state(monkeypatch):
 
     monkeypatch.setitem(api_main._DATASTORE, "ingest_repository", EventsRepository())
 
-    with TestClient(app).stream("GET", "/ingest/run_1/events") as response:
+    with _ingest_client(monkeypatch).stream("GET", "/ingest/run_1/events") as response:
         body = "".join(response.iter_text())
 
     assert response.status_code == 200

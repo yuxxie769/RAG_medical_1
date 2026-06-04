@@ -114,6 +114,7 @@ def test_ui_home_renders_profile_modal(monkeypatch):
 
     assert response.status_code == 200
     assert "先给自己起个昵称" in response.text
+    assert "导入工作台" in response.text
 
 
 def test_profile_submission_sets_cookie(monkeypatch):
