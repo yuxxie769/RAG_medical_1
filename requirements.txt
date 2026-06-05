@@ -7,7 +7,7 @@ python-multipart
 numpy
 pandas
 openai
-pymilvus==3.0.0
+pymilvus==2.6.12
 pymongo
 pytest
 markdown

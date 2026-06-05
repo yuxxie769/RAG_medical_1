@@ -23,6 +23,7 @@ from app.retrieval import (
     MilvusOperationError,
     MilvusStore,
     NoopReranker,
+    LocalHTTPEmbedder,
     OpenAICompatibleEmbedder,
     OpenAICompatibleReranker,
     VectorIndexer,
@@ -32,6 +33,7 @@ from app.retrieval import (
 app = FastAPI(title=settings.project_name)
 logger = get_logger(__name__)
 
+# 全局数据存储
 _DATASTORE = {
     "embedder": None,
     "store": None,
@@ -53,7 +55,7 @@ class IngestRequest(BaseModel):
     flush_to_milvus: bool = Field(default=True, description="Whether to write into Milvus after indexing")
     force_reingest: bool = Field(default=False, description="Create a new ingest run and rescan the source")
 
-
+#run任务失败详情
 class FailedBatchDetail(BaseModel):
     batch_id: str
     start_line: int
@@ -61,7 +63,7 @@ class FailedBatchDetail(BaseModel):
     attempt_count: int = 0
     error: str | None = None
 
-
+#run任务接受响应
 class IngestAcceptedResponse(BaseModel):
     status: Literal["queued"]
     ingest_run_id: str
@@ -71,6 +73,7 @@ class IngestAcceptedResponse(BaseModel):
     cancel_url: str
 
 
+#run任务状态响应
 class IngestStatusResponse(BaseModel):
     ingest_run_id: str
     exists: bool
@@ -118,7 +121,7 @@ class QueryHit(BaseModel):
     score: float
     metadata: dict = Field(default_factory=dict)
 
-
+#查询响应
 class QueryResponse(BaseModel):
     query: str
     search_method: Literal["hybrid", "dense", "sparse"]
@@ -127,25 +130,33 @@ class QueryResponse(BaseModel):
     min_score: float
     hits: list[QueryHit] = Field(default_factory=list)
 
-
+#回答请求
 class AnswerRequest(BaseModel):
     query: str
     top_k: int = Field(default=settings.top_k, ge=1, le=100)
 
-
+#回答响应
 class AnswerResponse(BaseModel):
     query: str
     answer: str
     fallback: bool = False
     citations: list[QueryHit] = Field(default_factory=list)
 
-
+# 初始化embbder使用emb api key构建emb对象
 def _build_embedder():
+    embedding_base_url = settings.embedding_base_url.strip()
+    if embedding_base_url.rstrip("/").endswith("/embeddings"):
+        logger.info("Using local HTTP embedder endpoint=%s", embedding_base_url)
+        return LocalHTTPEmbedder(
+            endpoint=embedding_base_url,
+            timeout=settings.embedding_timeout_seconds,
+            expected_dimension=settings.embedding_dimension,
+        )
     if settings.embedding_api_key:
         logger.info("Using OpenAI-compatible embedder with remote API.")
         return OpenAICompatibleEmbedder(
             api_key=settings.embedding_api_key,
-            base_url=settings.embedding_base_url,
+            base_url=embedding_base_url,
             model=settings.embedding_model_name,
             dimensions=settings.embedding_dimension,
             timeout=settings.embedding_timeout_seconds,
@@ -153,7 +164,7 @@ def _build_embedder():
     logger.info("Using dummy embedder for local development.")
     return DummyEmbedder(settings.embedding_dimension)
 
-
+# 初始化store使用milvus_collection_name构建store对象
 def _build_store() -> MilvusStore:
     schema = MilvusCollectionSchema(
         collection_name=settings.milvus_collection_name,
@@ -171,7 +182,7 @@ def _build_store() -> MilvusStore:
         management_timeout_seconds=settings.milvus_management_timeout_seconds,
     )
 
-
+# 合并初始化indexer对象
 def _new_indexer() -> VectorIndexer:
     return VectorIndexer(
         embedder=_build_embedder(),
@@ -201,7 +212,7 @@ def _build_reranker():
         )
     raise ValueError(f"Unsupported rerank provider: {settings.rerank_provider}")
 
-
+# retriver包含embedder、store、reranker
 def _get_retriever() -> HybridRetriever:
     if _DATASTORE["retriever"] is None:
         if _DATASTORE["embedder"] is None:
@@ -225,7 +236,7 @@ def _get_generator() -> Generator:
         )
     return _DATASTORE["generator"]
 
-
+# 获取ingest数据层对象
 def _get_ingest_repository() -> MongoIngestRepository:
     if _DATASTORE["ingest_repository"] is None:
         _DATASTORE["ingest_repository"] = MongoIngestRepository(
@@ -236,7 +247,7 @@ def _get_ingest_repository() -> MongoIngestRepository:
         )
     return _DATASTORE["ingest_repository"]
 
-
+# 打包ingest相关的地址、indexer、batch size，为service对象
 def _get_ingest_service() -> IngestService:
     if _DATASTORE["ingest_service"] is None:
         _DATASTORE["ingest_service"] = IngestService(
@@ -246,7 +257,7 @@ def _get_ingest_service() -> IngestService:
         )
     return _DATASTORE["ingest_service"]
 
-
+# 打包 admin信息存储相关
 def _get_admin_repository() -> AdminRepository:
     if _DATASTORE["admin_repository"] is None:
         _DATASTORE["admin_repository"] = AdminRepository(

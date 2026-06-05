@@ -1,7 +1,11 @@
+import json
+from unittest.mock import patch
+
 from app.core.models import Document
 from app.retrieval import (
     DummyEmbedder,
     HybridRetrievalRequest,
+    LocalHTTPEmbedder,
     MilvusCollectionSchema,
     MilvusStore,
     RetrievalConfig,
@@ -69,3 +73,61 @@ def test_embedding_and_milvus_skeleton_interfaces_exist():
     assert indexer.batch_size == 2
     assert store.schema.collection_name == "rag_medical_documents"
     assert HybridRetrievalRequest(query="abc", top_k=5).dense_weight == 0.5
+
+
+class _FakeHTTPResponse:
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def test_local_http_embedder_reads_embeddings_from_json_endpoint():
+    embedder = LocalHTTPEmbedder(
+        endpoint="http://127.0.0.1:8001/embeddings",
+        expected_dimension=3,
+    )
+
+    with patch(
+        "app.retrieval.embedder.urllib_request.urlopen",
+        return_value=_FakeHTTPResponse(
+            {
+                "count": 2,
+                "dim": 3,
+                "embeddings": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
+            }
+        ),
+    ):
+        vectors = embedder.embed_texts(["a", "b"])
+
+    assert vectors == [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+
+
+def test_local_http_embedder_rejects_dimension_mismatch():
+    embedder = LocalHTTPEmbedder(
+        endpoint="http://127.0.0.1:8001/embeddings",
+        expected_dimension=4,
+    )
+
+    with patch(
+        "app.retrieval.embedder.urllib_request.urlopen",
+        return_value=_FakeHTTPResponse(
+            {
+                "count": 1,
+                "dim": 3,
+                "embeddings": [[0.1, 0.2, 0.3]],
+            }
+        ),
+    ):
+        try:
+            embedder.embed_texts(["a"])
+            assert False, "expected dimension mismatch"
+        except ValueError as exc:
+            assert "Embedding dimension mismatch" in str(exc)

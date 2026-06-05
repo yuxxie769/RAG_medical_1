@@ -1,4 +1,4 @@
-from .embedder import DummyEmbedder, Embedder, OpenAICompatibleEmbedder
+from .embedder import DummyEmbedder, Embedder, LocalHTTPEmbedder, OpenAICompatibleEmbedder
 from .hybrid import HybridRetrievalRequest, HybridRetriever, RRFConfig, WeightedFusionConfig, fuse_scores, reorder_hits, to_hybrid_hits
 from .indexer import VectorIndexingResult, VectorIndexer
 from .milvus_store import InMemoryMilvusStore, MilvusCollectionSchema, MilvusOperationError, MilvusRecord, MilvusStore, MilvusUpsertResult, SearchMethod, build_records
@@ -8,6 +8,7 @@ from .retriever import RetrievalConfig, Retriever
 __all__ = [
     "DummyEmbedder",
     "Embedder",
+    "LocalHTTPEmbedder",
     "OpenAICompatibleEmbedder",
     "HybridRetrievalRequest",
     "HybridRetriever",

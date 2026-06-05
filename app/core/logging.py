@@ -1,6 +1,6 @@
 import logging
 
-
+# 创建并返回配置好的日志记录器，避免重复添加处理器
 def get_logger(name: str = "rag_medical") -> logging.Logger:
     logger = logging.getLogger(name)
     if not logger.handlers:
