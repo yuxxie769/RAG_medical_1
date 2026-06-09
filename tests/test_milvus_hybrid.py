@@ -14,6 +14,7 @@ class FakeMilvusClient:
         self.hybrid_search_calls = []
         self.dropped = []
         self.flushed = []
+        self.query_iterator_calls = []
 
     def query(self, **kwargs):
         return [{"doc_id": doc_id} for doc_id in self.persisted_ids]
@@ -32,6 +33,37 @@ class FakeMilvusClient:
     def hybrid_search(self, **kwargs):
         self.hybrid_search_calls.append(kwargs)
         return [[{"id": "doc_1", "distance": 0.5, "entity": {"content": "answer"}}]]
+
+    def query_iterator(self, **kwargs):
+        self.query_iterator_calls.append(kwargs)
+        return _FakeIterator(
+            [
+                [
+                    {
+                        "doc_id": "doc_1",
+                        "question": "Q1",
+                        "answer": "A1",
+                        "source": "sample",
+                        "source_path": "sample.jsonl",
+                        "source_line_no": 1,
+                    }
+                ]
+            ]
+        )
+
+
+class _FakeIterator:
+    def __init__(self, batches):
+        self.batches = list(batches)
+        self.closed = False
+
+    def next(self):
+        if not self.batches:
+            return []
+        return self.batches.pop(0)
+
+    def close(self):
+        self.closed = True
 
 
 class FakeEmbedder:
@@ -161,6 +193,65 @@ def test_count_uses_timeout_when_fetching_collection_stats():
     assert store.client.stats_call["timeout"] == store.request_timeout_seconds
 
 
+def test_iter_export_rows_uses_query_iterator():
+    store = make_store()
+
+    rows = list(store.iter_export_rows(batch_size=2))
+
+    assert rows[0].doc_id == "doc_1"
+    assert rows[0].question == "Q1"
+    assert rows[0].source_path == "sample.jsonl"
+    assert store.client.query_iterator_calls[0]["batch_size"] == 2
+    assert store.client.query_iterator_calls[0]["timeout"] == store.request_timeout_seconds
+
+
+def test_export_rows_page_and_group_query_use_query_api():
+    class QueryClient(FakeMilvusClient):
+        def __init__(self):
+            super().__init__()
+            self.query_calls = []
+
+        def query(self, **kwargs):
+            self.query_calls.append(kwargs)
+            if "source_line_no ==" in kwargs.get("filter", ""):
+                return [
+                    {
+                        "doc_id": "doc_group",
+                        "question": "Q-group",
+                        "answer": "A-group",
+                        "source": "sample",
+                        "source_path": "sample.jsonl",
+                        "source_line_no": 9,
+                    }
+                ]
+            return [
+                {
+                    "doc_id": "doc_page",
+                    "question": "Q-page",
+                    "answer": "A-page",
+                    "source": "sample",
+                    "source_path": "sample.jsonl",
+                    "source_line_no": 3,
+                }
+            ]
+
+    store = MilvusStore(MilvusCollectionSchema(collection_name="test_documents", dimension=2))
+    store.client = QueryClient()
+    store.create_collection = lambda: None
+
+    page_rows = store.export_rows_page(limit=1, offset=5)
+    group_rows = store.export_rows_for_group(
+        source_path="sample.jsonl",
+        source_line_no=9,
+        question="Q-group",
+    )
+
+    assert page_rows[0].doc_id == "doc_page"
+    assert group_rows[0].doc_id == "doc_group"
+    assert store.client.query_calls[0]["offset"] == 5
+    assert "source_line_no == 9" in store.client.query_calls[1]["filter"]
+
+
 def test_flush_uses_management_timeout():
     store = make_store()
 
@@ -210,6 +301,43 @@ def test_existing_dense_only_schema_is_rejected():
 
     with pytest.raises(RuntimeError, match="old dense-only schema"):
         store._validate_existing_schema()
+
+
+def test_create_collection_caches_loaded_collection():
+    class ExistingCollectionClient:
+        def __init__(self):
+            self.has_collection_calls = 0
+            self.describe_collection_calls = 0
+            self.load_collection_calls = 0
+
+        def has_collection(self, **kwargs):
+            self.has_collection_calls += 1
+            return True
+
+        def describe_collection(self, **kwargs):
+            self.describe_collection_calls += 1
+            return {
+                "fields": [
+                    {"name": "doc_id"},
+                    {"name": "embedding"},
+                    {"name": "sparse_embedding"},
+                    {"name": "content"},
+                ],
+                "functions": [{"type": FunctionType.BM25}],
+            }
+
+        def load_collection(self, **kwargs):
+            self.load_collection_calls += 1
+
+    store = MilvusStore(MilvusCollectionSchema(collection_name="test_documents"))
+    store.client = ExistingCollectionClient()
+
+    store.create_collection()
+    store.create_collection()
+
+    assert store.client.has_collection_calls == 1
+    assert store.client.describe_collection_calls == 1
+    assert store.client.load_collection_calls == 1
 
 
 def test_reset_collection_refuses_to_drop_without_confirmation():

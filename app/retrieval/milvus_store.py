@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Literal, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Literal, Sequence
 
 from pymilvus import AnnSearchRequest, DataType, Function, FunctionType, MilvusClient, RRFRanker
 from pymilvus.exceptions import MilvusException
@@ -30,6 +30,16 @@ class MilvusRecord:
 class MilvusUpsertResult:
     inserted_count: int
     existing_count: int
+
+
+@dataclass
+class MilvusExportRow:
+    doc_id: str
+    question: str
+    answer: str
+    source: str
+    source_path: str
+    source_line_no: int
 
 
 @dataclass
@@ -72,6 +82,7 @@ class MilvusStore:
         self.request_timeout_seconds = request_timeout_seconds
         self.management_timeout_seconds = management_timeout_seconds
         self.client: MilvusClient | None = None
+        self._collection_ready = False
 
     def connect(self) -> MilvusClient:
         if self.client is None:
@@ -188,6 +199,8 @@ class MilvusStore:
             )
 
     def create_collection(self) -> None:
+        if self._collection_ready:
+            return
         client = self.connect()
         if self._call_milvus(
             "has_collection",
@@ -202,6 +215,7 @@ class MilvusStore:
                 timeout=self.management_timeout_seconds,
                 collection_name=self.schema.collection_name,
             )
+            self._collection_ready = True
             return
 
         self._call_milvus(
@@ -218,6 +232,7 @@ class MilvusStore:
             timeout=self.management_timeout_seconds,
             collection_name=self.schema.collection_name,
         )
+        self._collection_ready = True
 
     def _existing_doc_ids(self, doc_ids: Sequence[str]) -> set[str]:
         if not doc_ids:
@@ -413,6 +428,102 @@ class MilvusStore:
         )
         return int(stats.get("row_count", 0))
 
+    def iter_export_rows(self, batch_size: int = 1000) -> Iterator[MilvusExportRow]:
+        self.create_collection()
+        client = self.connect()
+        iterator = self._call_milvus(
+            "query_iterator",
+            client.query_iterator,
+            timeout=self.request_timeout_seconds,
+            collection_name=self.schema.collection_name,
+            batch_size=batch_size,
+            filter="",
+            output_fields=[
+                self.schema.primary_field_name,
+                "question",
+                "answer",
+                "source",
+                "source_path",
+                "source_line_no",
+            ],
+        )
+        next_method = getattr(iterator, "next", None)
+        close_method = getattr(iterator, "close", None)
+
+        try:
+            if callable(next_method):
+                while True:
+                    rows = next_method()
+                    if not rows:
+                        break
+                    for row in rows:
+                        yield self._to_export_row(row)
+                return
+
+            for rows in iterator:
+                if not rows:
+                    continue
+                for row in rows:
+                    yield self._to_export_row(row)
+        finally:
+            if callable(close_method):
+                close_method()
+
+    def _to_export_row(self, row: dict[str, Any]) -> MilvusExportRow:
+        return MilvusExportRow(
+            doc_id=str(row.get(self.schema.primary_field_name, "")),
+            question=str(row.get("question", "")),
+            answer=str(row.get("answer", "")),
+            source=str(row.get("source", "")),
+            source_path=str(row.get("source_path", "")),
+            source_line_no=int(row.get("source_line_no") or 0),
+        )
+
+    def export_rows_page(self, *, limit: int, offset: int = 0) -> list[MilvusExportRow]:
+        self.create_collection()
+        rows = self._call_milvus(
+            "query",
+            self.connect().query,
+            timeout=self.request_timeout_seconds,
+            collection_name=self.schema.collection_name,
+            filter="",
+            output_fields=[
+                self.schema.primary_field_name,
+                "question",
+                "answer",
+                "source",
+                "source_path",
+                "source_line_no",
+            ],
+            limit=limit,
+            offset=offset,
+        )
+        return [self._to_export_row(row) for row in rows]
+
+    def export_rows_for_group(self, *, source_path: str, source_line_no: int, question: str) -> list[MilvusExportRow]:
+        self.create_collection()
+        rows = self._call_milvus(
+            "query",
+            self.connect().query,
+            timeout=self.request_timeout_seconds,
+            collection_name=self.schema.collection_name,
+            filter=(
+                f"source_line_no == {int(source_line_no)} "
+                f"and source_path == {source_path!r} "
+                f"and question == {question!r}"
+            ),
+            output_fields=[
+                self.schema.primary_field_name,
+                "question",
+                "answer",
+                "source",
+                "source_path",
+                "source_line_no",
+            ],
+            limit=16384,
+        )
+        return [self._to_export_row(row) for row in rows]
+
 
 @dataclass
 class InMemoryMilvusStore(MilvusStore):
@@ -425,6 +536,7 @@ class InMemoryMilvusStore(MilvusStore):
         self._records = {}
 
     def create_collection(self) -> None:
+        self._collection_ready = True
         return None
 
     def _existing_doc_ids(self, doc_ids: Sequence[str]) -> set[str]:
@@ -481,6 +593,28 @@ class InMemoryMilvusStore(MilvusStore):
 
     def count(self) -> int:
         return len(self._records)
+
+    def iter_export_rows(self, batch_size: int = 1000) -> Iterator[MilvusExportRow]:
+        for record in self._records.values():
+            yield MilvusExportRow(
+                doc_id=record.doc_id,
+                question=record.question,
+                answer=record.answer,
+                source=str(record.metadata.get("source", "")),
+                source_path=str(record.metadata.get("source_path", "")),
+                source_line_no=int(record.metadata.get("source_line_no") or 0),
+            )
+
+    def export_rows_page(self, *, limit: int, offset: int = 0) -> list[MilvusExportRow]:
+        rows = list(self.iter_export_rows())
+        return rows[offset:offset + limit]
+
+    def export_rows_for_group(self, *, source_path: str, source_line_no: int, question: str) -> list[MilvusExportRow]:
+        return [
+            row
+            for row in self.iter_export_rows()
+            if row.source_path == source_path and row.source_line_no == source_line_no and row.question == question
+        ]
 
 
 def build_records(documents: Sequence[Document], vectors: Sequence[List[float]]) -> List[MilvusRecord]:

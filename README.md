@@ -206,6 +206,24 @@ uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
 
 如果当前没有可用索引数据，相关接口不会返回正常结果，因此第一次使用前需要先完成导入。
 
+### 第三阶段检索评测脚本
+
+第三阶段已经落地了评测集生成和检索评估脚本，统一入口是 [scripts/evaluate.py](C:/Users/xieyuxiang/Documents/RAG_medical/scripts/evaluate.py)。
+
+先生成评测集：
+
+```powershell
+uv run scripts\evaluate.py build_retrieval_set --collection rag_medical_documents_test --sample-size 50
+```
+
+再跑检索评估：
+
+```powershell
+uv run scripts\evaluate.py retrieval --dataset eval/datasets/retrieval_eval.jsonl --search-method all
+```
+
+详细参数、产物和评测口径见 [第三阶段检索评测脚本说明](C:/Users/xieyuxiang/Documents/RAG_medical/docs/第三阶段检索评测脚本说明.md)。
+
 ## 文档索引
 
 如果你想看更细的实现说明，直接看这些文档：
@@ -215,6 +233,8 @@ uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
 - [导入断点续跑说明](C:/Users/xieyuxiang/Documents/RAG_medical/docs/ingest_resume.md)
 - [前端架构](C:/Users/xieyuxiang/Documents/RAG_medical/docs/前端架构.md)
 - [前端第二阶段流程任务核查清单](C:/Users/xieyuxiang/Documents/RAG_medical/docs/前端第二阶段流程任务核查清单.md)
+- [第三阶段评测与验证架构方案](C:/Users/xieyuxiang/Documents/RAG_medical/docs/第三阶段评测与验证架构方案.md)
+- [第三阶段检索评测脚本说明](C:/Users/xieyuxiang/Documents/RAG_medical/docs/第三阶段检索评测脚本说明.md)
 
 ## 后续重点
 
