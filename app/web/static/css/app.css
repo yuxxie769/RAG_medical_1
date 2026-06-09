@@ -412,11 +412,67 @@ button {
   font-size: 0.9rem;
 }
 
-.citation-list {
+.reference-group {
+  margin-top: 14px;
+}
+
+.reference-group .eyebrow {
+  display: block;
+}
+
+.reference-drawer {
+  margin-top: 8px;
+  border: 1px solid rgba(139, 120, 184, 0.14);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.42);
+  overflow: hidden;
+}
+
+.reference-drawer[open] {
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.reference-drawer-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.reference-drawer-toggle::-webkit-details-marker {
+  display: none;
+}
+
+.reference-drawer-toggle::after {
+  content: "展开";
+  flex-shrink: 0;
+  color: var(--accent);
+  font-size: 0.84rem;
+}
+
+.reference-drawer[open] .reference-drawer-toggle::after {
+  content: "收起";
+}
+
+.reference-drawer-meta {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  text-align: right;
+}
+
+.reference-drawer-panel {
+  padding: 0 14px 14px;
+  border-top: 1px solid rgba(139, 120, 184, 0.1);
+}
+
+.reference-chip-grid {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  margin-top: 14px;
+  margin-top: 8px;
 }
 
 .citation-chip {
@@ -424,6 +480,7 @@ button {
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
+  min-width: 0;
   max-width: 220px;
   padding: 10px 12px;
   background: rgba(139, 120, 184, 0.08);
@@ -437,6 +494,15 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-muted);
+}
+
+.retrieval-result-chip {
+  cursor: pointer;
+}
+
+.retrieval-result-chip:hover,
+.reference-drawer-toggle:hover {
+  background: rgba(139, 120, 184, 0.12);
 }
 
 .ask-form {

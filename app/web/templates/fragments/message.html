@@ -11,18 +11,47 @@
   <div class="message-content">{{ render_message_content(message, active_conversation) }}</div>
 
   {% if message.role == "assistant" and message.citations %}
-    <div class="citation-list">
-      {% for citation in message.citations %}
-        <button
-          class="citation-chip"
-          hx-get="/ui/conversations/{{ active_conversation.conversation_id }}/messages/{{ message.message_id }}/citations/{{ loop.index0 }}"
-          hx-target="#citation-detail"
-          hx-swap="innerHTML"
-        >
-          <span>依据 {{ loop.index }}</span>
-          <small>{{ citation.doc_id }}</small>
-        </button>
-      {% endfor %}
-    </div>
+    <section class="reference-group">
+      <span class="eyebrow">正文引用</span>
+      <div class="reference-chip-grid">
+        {% for citation in message.citations %}
+          <button
+            class="citation-chip"
+            hx-get="/ui/conversations/{{ active_conversation.conversation_id }}/messages/{{ message.message_id }}/citations/{{ loop.index0 }}"
+            hx-target="#citation-detail"
+            hx-swap="innerHTML"
+          >
+            <span>依据 {{ loop.index }}</span>
+            <small>{{ citation.doc_id }}</small>
+          </button>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
+
+  {% if message.role == "assistant" and message.retrieval_results %}
+    <section class="reference-group retrieval-results-list">
+      <details class="reference-drawer">
+        <summary class="reference-drawer-toggle">
+          <span class="eyebrow">检索结果</span>
+          <span class="reference-drawer-meta">共 {{ message.retrieval_results | length }} 条，点击展开查看</span>
+        </summary>
+        <div class="reference-drawer-panel">
+          <div class="reference-chip-grid">
+            {% for result in message.retrieval_results %}
+              <button
+                class="citation-chip retrieval-result-chip"
+                hx-get="/ui/conversations/{{ active_conversation.conversation_id }}/messages/{{ message.message_id }}/retrieval-results/{{ loop.index0 }}"
+                hx-target="#citation-detail"
+                hx-swap="innerHTML"
+              >
+                <span>检索 {{ loop.index }}</span>
+                <small>{{ result.doc_id }}</small>
+              </button>
+            {% endfor %}
+          </div>
+        </div>
+      </details>
+    </section>
   {% endif %}
 </article>

@@ -857,6 +857,57 @@ def show_citation(
             **context,
             "citation": citation,
             "citation_error": citation_error,
+            "reference_label": "正文引用",
+        },
+        status_code=status_code,
+    )
+
+
+@router.get(
+    "/ui/conversations/{conversation_id}/messages/{message_id}/retrieval-results/{result_index}",
+    response_class=HTMLResponse,
+)
+def show_retrieval_result(
+    request: Request,
+    conversation_id: str,
+    message_id: str,
+    result_index: int,
+) -> HTMLResponse:
+    user_token = request.cookies.get(USER_COOKIE_NAME)
+    context = _base_context(request)
+    if not user_token:
+        return templates.TemplateResponse(
+            request,
+            "fragments/citation_detail.html",
+            {
+                **context,
+                "citation": None,
+                "citation_error": "请先设置昵称",
+                "reference_label": "检索结果",
+            },
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+    try:
+        citation = _chat_service().get_retrieval_result(user_token, conversation_id, message_id, result_index)
+        citation_error = None
+        status_code = status.HTTP_200_OK
+    except (PermissionError, KeyError, IndexError) as exc:
+        citation = None
+        citation_error = str(exc)
+        status_code = status.HTTP_404_NOT_FOUND
+    except ChatUnavailable as exc:
+        citation = None
+        citation_error = str(exc)
+        status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
+    return templates.TemplateResponse(
+        request,
+        "fragments/citation_detail.html",
+        {
+            **context,
+            "citation": citation,
+            "citation_error": citation_error,
+            "reference_label": "检索结果",
         },
         status_code=status_code,
     )

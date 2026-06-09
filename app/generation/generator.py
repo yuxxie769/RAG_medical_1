@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import List, Sequence
 
@@ -9,6 +10,7 @@ from app.core.logging import get_logger
 from app.core.models import GenerationResult, RetrievalResult
 
 logger = get_logger(__name__)
+CITATION_REF_PATTERN = re.compile(r"\[(\d+)\]")
 
 
 @dataclass
@@ -83,6 +85,9 @@ class Generator:
             "2. 不确定时明确说明\n"
             "3. 输出简洁、专业、适合医疗场景\n"
             "4. 并非所有证据都有用\n"
+            "5. 关键结论后必须紧跟引用编号，如 [1]、[2]\n"
+            "6. 只能使用提供的证据编号，不能编造新的编号\n"
+            "7. 如果某句话没有明确证据支撑，就不要加引用编号\n"
         )
 
     def generate(self, query: str, citations: Sequence[RetrievalResult]) -> GenerationResult:
@@ -92,6 +97,7 @@ class Generator:
                 query=query,
                 answer="当前未配置 LLM API Key，暂无法生成答案。",
                 citations=list(citations),
+                retrieval_results=list(citations),
                 fallback=True,
             )
 
@@ -110,6 +116,7 @@ class Generator:
                 query=query,
                 answer=answer.strip(),
                 citations=list(citations),
+                retrieval_results=list(citations),
                 fallback=False,
             )
         except Exception as exc:
@@ -118,5 +125,27 @@ class Generator:
                 query=query,
                 answer="生成失败，请稍后重试或检查模型配置。",
                 citations=list(citations),
+                retrieval_results=list(citations),
                 fallback=True,
             )
+
+
+def normalize_answer_citations(
+    answer: str,
+    retrieval_results: Sequence[RetrievalResult],
+) -> tuple[str, list[RetrievalResult]]:
+    index_mapping: dict[int, int] = {}
+    ordered_source_indexes: list[int] = []
+
+    def _replace(match: re.Match[str]) -> str:
+        raw_index = int(match.group(1)) - 1
+        if raw_index < 0 or raw_index >= len(retrieval_results):
+            return ""
+        if raw_index not in index_mapping:
+            index_mapping[raw_index] = len(index_mapping) + 1
+            ordered_source_indexes.append(raw_index)
+        return f"[{index_mapping[raw_index]}]"
+
+    normalized_answer = CITATION_REF_PATTERN.sub(_replace, answer)
+    cited_results = [retrieval_results[index] for index in ordered_source_indexes]
+    return normalized_answer, cited_results

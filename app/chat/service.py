@@ -103,13 +103,14 @@ class ChatService:
                 self._title_from_query(query),
             )
 
-        answer_text, fallback, citations = self._generate_answer(query, top_k)
+        answer_text, fallback, citations, retrieval_results = self._generate_answer(query, top_k)
         self.repository.create_message(
             conversation["conversation_id"],
             "assistant",
             answer_text,
             fallback=fallback,
             citations=citations,
+            retrieval_results=retrieval_results,
         )
 
     def get_citation(self, user_token: str, conversation_id: str, message_id: str, citation_index: int) -> dict:
@@ -123,16 +124,28 @@ class ChatService:
             raise IndexError("引用索引超出范围")
         return citations[citation_index]
 
-    def _generate_answer(self, query: str, top_k: int) -> tuple[str, bool, list[dict]]:
+    def get_retrieval_result(self, user_token: str, conversation_id: str, message_id: str, result_index: int) -> dict:
+        profile = self._require_profile(user_token)
+        self._require_conversation(conversation_id, profile["user_token"])
+        message = self.repository.get_message(conversation_id, message_id)
+        if message is None or message.get("role") != "assistant":
+            raise KeyError("未找到检索结果")
+        retrieval_results = message.get("retrieval_results") or []
+        if result_index < 0 or result_index >= len(retrieval_results):
+            raise IndexError("检索结果索引超出范围")
+        return retrieval_results[result_index]
+
+    def _generate_answer(self, query: str, top_k: int) -> tuple[str, bool, list[dict], list[dict]]:
         from app.api import main as api_main
 
         try:
             response = api_main.answer_query(api_main.AnswerRequest(query=query, top_k=top_k))
             citations = [item.model_dump(mode="json") for item in response.citations]
-            return response.answer, response.fallback, citations
+            retrieval_results = [item.model_dump(mode="json") for item in getattr(response, "retrieval_results", [])]
+            return response.answer, response.fallback, citations, retrieval_results
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else "问答服务暂时不可用"
-            return f"当前暂时无法完成回答：{detail}", True, []
+            return f"当前暂时无法完成回答：{detail}", True, [], []
 
     def _require_profile(self, user_token: str | None) -> dict:
         profile = self.repository.get_profile(user_token)

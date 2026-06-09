@@ -129,6 +129,7 @@ class ChatRepository:
         *,
         fallback: bool = False,
         citations: list[dict] | None = None,
+        retrieval_results: list[dict] | None = None,
     ) -> dict:
         self.ping()
         now = _utcnow()
@@ -139,6 +140,7 @@ class ChatRepository:
             "content": content,
             "fallback": fallback,
             "citations": citations or [],
+            "retrieval_results": retrieval_results or [],
             "created_at": now,
         }
         self.messages.insert_one(message)

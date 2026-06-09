@@ -68,6 +68,10 @@ class Settings(BaseModel):
     llm_base_url: str = os.getenv("LLM_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
     llm_model_name: str = os.getenv("LLM_MODEL_NAME", "qwen-plus")
     llm_timeout_seconds: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+    judge_api_key: str = os.getenv("JUDGE_API_KEY", "")
+    judge_base_url: str = os.getenv("JUDGE_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+    judge_model_name: str = os.getenv("JUDGE_MODEL_NAME", "qwen-plus")
+    judge_timeout_seconds: int = int(os.getenv("JUDGE_TIMEOUT_SECONDS", "30"))
 
 
 settings = Settings()

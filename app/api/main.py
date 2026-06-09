@@ -13,7 +13,7 @@ from app.chat import ChatRepository, ChatService
 from app.config.settings import settings
 from app.core.logging import get_logger
 from app.core.models import RetrievalResult
-from app.generation import Generator
+from app.generation import Generator, normalize_answer_citations
 from app.ingest import IngestLeaseConflict, IngestService, MongoIngestRepository, MongoUnavailable
 from app.ingest.repository import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES
 from app.retrieval import (
@@ -141,6 +141,7 @@ class AnswerResponse(BaseModel):
     answer: str
     fallback: bool = False
     citations: list[QueryHit] = Field(default_factory=list)
+    retrieval_results: list[QueryHit] = Field(default_factory=list)
 
 # 初始化embbder使用emb api key构建emb对象
 def _build_embedder():
@@ -538,25 +539,31 @@ def query_documents(request: QueryRequest) -> QueryResponse:
 @app.post("/answer", response_model=AnswerResponse)
 def answer_query(request: AnswerRequest) -> AnswerResponse:
     query_response = query_documents(QueryRequest(query=request.query, top_k=request.top_k))
-    citations = [
+    retrieval_results = [
         RetrievalResult(doc_id=item.doc_id, content=item.content, score=item.score, metadata=item.metadata)
         for item in query_response.hits
     ]
-    if not citations:
+    if not retrieval_results:
         return AnswerResponse(
             query=request.query,
             answer="抱歉，未检索到相关信息，建议您咨询专业医生或前往医院就诊。",
             fallback=True,
             citations=[],
+            retrieval_results=[],
         )
-    generation_result = _get_generator().generate(request.query, citations)
+    generation_result = _get_generator().generate(request.query, retrieval_results)
+    normalized_answer, cited_results = normalize_answer_citations(generation_result.answer, retrieval_results)
     return AnswerResponse(
         query=request.query,
-        answer=generation_result.answer,
+        answer=normalized_answer,
         fallback=generation_result.fallback,
         citations=[
             QueryHit(doc_id=item.doc_id, content=item.content, score=item.score, metadata=item.metadata)
-            for item in citations
+            for item in cited_results
+        ],
+        retrieval_results=[
+            QueryHit(doc_id=item.doc_id, content=item.content, score=item.score, metadata=item.metadata)
+            for item in retrieval_results
         ],
     )
 

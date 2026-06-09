@@ -25,7 +25,7 @@ class FakeRepository:
             return self.conversation
         return None
 
-    def create_message(self, conversation_id, role, content, *, fallback=False, citations=None):
+    def create_message(self, conversation_id, role, content, *, fallback=False, citations=None, retrieval_results=None):
         self.messages.append(
             {
                 "conversation_id": conversation_id,
@@ -33,6 +33,7 @@ class FakeRepository:
                 "content": content,
                 "fallback": fallback,
                 "citations": citations or [],
+                "retrieval_results": retrieval_results or [],
             }
         )
         return self.messages[-1]

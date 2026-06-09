@@ -28,6 +28,7 @@ class GenerationResult(BaseModel):
     query: str
     answer: str
     citations: List[RetrievalResult] = Field(default_factory=list)
+    retrieval_results: List[RetrievalResult] = Field(default_factory=list)
     fallback: bool = False
     latency: Optional[float] = None
 

@@ -15,9 +15,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.api.main import QueryRequest, query_documents
+from app.api.main import AnswerRequest, AnswerResponse, answer_query, QueryRequest, query_documents
 from app.config.settings import settings
 from app.data.cleaner import clean_records
+from app.evaluation import (
+    build_generation_failure_rows,
+    build_generation_judge,
+    run_generation_program_checks,
+    summarize_generation_results,
+)
+from app.evaluation.judge_client import JudgeError
 from app.retrieval import MilvusCollectionSchema, MilvusExportRow, MilvusStore
 
 
@@ -76,6 +83,22 @@ def _write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as file_handle:
         for row in rows:
             file_handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _serialize_query_hits(hits: list[Any]) -> list[dict[str, Any]]:
+    return [item.model_dump(mode="json") for item in hits]
+
+
+def _serialize_answer_citations(response: AnswerResponse) -> list[dict[str, Any]]:
+    """Use the final answer citations for faithfulness eval."""
+
+    return _serialize_query_hits(response.citations)
+
+
+def _serialize_answer_retrieval_results(response: AnswerResponse) -> list[dict[str, Any]]:
+    """Use the full retrieval hits for context relevance eval."""
+
+    return _serialize_query_hits(response.retrieval_results)
 
 
 def _load_raw_record(source_path: str, source_line_no: int) -> dict[str, Any]:
@@ -394,6 +417,110 @@ def run_retrieval_evaluation(
     }
 
 
+def run_generation_evaluation(
+    *,
+    dataset_path: Path,
+    output_dir: Path,
+    top_k: int,
+    sample_limit: int | None,
+) -> dict[str, Any]:
+    samples = [RetrievalEvalSample(**row) for row in _read_jsonl(dataset_path)]
+    if sample_limit is not None:
+        samples = samples[:sample_limit]
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        judge = build_generation_judge()
+        judge_boot_error: str | None = None
+    except Exception as exc:
+        judge = None
+        judge_boot_error = str(exc)
+
+    results: list[dict[str, Any]] = []
+    for index, sample in enumerate(samples, start=1):
+        print(f"[generation] sample {index}/{len(samples)} start: {sample.sample_id} {sample.query}")
+
+        print(f"[generation] sample {index}/{len(samples)} answering...")
+        started = perf_counter()
+        response = answer_query(AnswerRequest(query=sample.query, top_k=top_k))
+        latency_ms = (perf_counter() - started) * 1000
+        print(f"[generation] sample {index}/{len(samples)} answer done in {latency_ms:.2f} ms")
+        answer_citations = _serialize_answer_citations(response)
+        answer_retrieval_results = _serialize_answer_retrieval_results(response)
+        print(f"[generation] sample {index}/{len(samples)} program checks...")
+        program_checks = run_generation_program_checks(
+            query=sample.query,
+            answer=response.answer,
+            citations=answer_citations,
+            fallback=response.fallback,
+            latency_ms=latency_ms,
+            latency_target_seconds=settings.generation_timeout_seconds,
+        )
+
+        llm_judge_result: dict[str, Any] | None = None
+        judge_error = False
+        judge_error_reason: str | None = None
+        if judge is None:
+            judge_error = True
+            judge_error_reason = judge_boot_error or "Judge is unavailable."
+        else:
+            try:
+                llm_judge_result = judge.evaluate_response(
+                    query=sample.query,
+                    answer=response.answer,
+                    citations=answer_citations,
+                    retrieval_results=answer_retrieval_results,
+                    reference_answer=sample.reference_answer,
+                )
+            except JudgeError as exc:
+                judge_error = True
+                judge_error_reason = str(exc)
+
+        results.append(
+            {
+                "sample_id": sample.sample_id,
+                "query": sample.query,
+                "reference_answer": sample.reference_answer,
+                "source": sample.source,
+                "gold_doc_ids": sample.gold_doc_ids,
+                "answer": response.answer,
+                "fallback": response.fallback,
+                "citations": answer_citations,
+                "retrieval_results": answer_retrieval_results,
+                "latency_ms": latency_ms,
+                "program_checks": program_checks,
+                "llm_judge_result": llm_judge_result,
+                "judge_error": judge_error,
+                "judge_error_reason": judge_error_reason,
+            }
+        )
+
+    summary = summarize_generation_results(results)
+    summary.update(
+        {
+            "dataset_path": str(dataset_path),
+            "top_k": top_k,
+            "notes": [
+                "medical_correctness is treated as a lower-confidence auxiliary dimension in v1.",
+            ],
+        }
+    )
+
+    results_path = output_dir / "generation_results.jsonl"
+    summary_path = output_dir / "generation_summary.json"
+    failures_path = output_dir / "generation_failures.jsonl"
+    _write_jsonl(results_path, results)
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_jsonl(failures_path, build_generation_failure_rows(results))
+    return {
+        "results_path": str(results_path),
+        "summary_path": str(summary_path),
+        "failures_path": str(failures_path),
+        "sample_count": len(results),
+        "judge_error_count": summary["judge_error_count"],
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluation utilities for stage 3 retrieval baselines.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -410,6 +537,12 @@ def _build_parser() -> argparse.ArgumentParser:
     retrieval_parser.add_argument("--top-k", type=int, default=10)
     retrieval_parser.add_argument("--fetch-k", type=int, default=max(10, settings.fetch_k))
     retrieval_parser.add_argument("--output-dir", default="eval/reports")
+
+    generation_parser = subparsers.add_parser("generation")
+    generation_parser.add_argument("--dataset", default="eval/datasets/retrieval_eval.jsonl")
+    generation_parser.add_argument("--output-dir", default="eval/reports")
+    generation_parser.add_argument("--top-k", type=int, default=settings.top_k)
+    generation_parser.add_argument("--sample-limit", type=int, default=None)
 
     return parser
 
@@ -431,6 +564,13 @@ def main(argv: list[str] | None = None) -> int:
             top_k=args.top_k,
             fetch_k=args.fetch_k,
             output_dir=Path(args.output_dir),
+        )
+    elif args.command == "generation":
+        result = run_generation_evaluation(
+            dataset_path=Path(args.dataset),
+            output_dir=Path(args.output_dir),
+            top_k=args.top_k,
+            sample_limit=args.sample_limit,
         )
     else:
         parser.error(f"Unsupported command: {args.command}")

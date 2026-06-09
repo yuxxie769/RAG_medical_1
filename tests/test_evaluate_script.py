@@ -1,6 +1,6 @@
 import json
 
-from app.api.main import QueryHit, QueryResponse
+from app.api.main import AnswerResponse, QueryHit, QueryResponse
 from app.data.cleaner import clean_records
 from app.kb.builder import build_documents
 from app.retrieval import InMemoryMilvusStore, MilvusCollectionSchema, build_records
@@ -220,3 +220,235 @@ def test_run_retrieval_evaluation_supports_multiple_gold_doc_ids(tmp_path, monke
     assert summary["methods"]["hybrid"]["recall_at_10"] == 1.0
     assert len(failures) == 1
     assert failures[0]["search_method"] == "sparse"
+
+
+def test_run_generation_evaluation_writes_results_summary_and_failures(tmp_path, monkeypatch):
+    dataset_path = tmp_path / "retrieval_eval.jsonl"
+    dataset_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "sample_id": "eval_000001",
+                        "query": "胸痛怎么办？",
+                        "gold_doc_ids": ["doc_1"],
+                        "reference_answer": "如出现胸痛应及时就医。",
+                        "source": "sample",
+                        "source_path": "sample.jsonl",
+                        "source_line_no": 1,
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "sample_id": "eval_000002",
+                        "query": "普通感冒要不要休息？",
+                        "gold_doc_ids": ["doc_2"],
+                        "reference_answer": "建议休息补水。",
+                        "source": "sample",
+                        "source_path": "sample.jsonl",
+                        "source_line_no": 2,
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_answer_query(request):
+        if request.query == "胸痛怎么办？":
+            return AnswerResponse(
+                query=request.query,
+                answer="建议尽快就医或急诊评估，不要自行观察。",
+                fallback=False,
+                citations=[QueryHit(doc_id="doc_1", content="胸痛需及时评估", score=0.9, metadata={})],
+                retrieval_results=[QueryHit(doc_id="doc_1", content="胸痛需及时评估", score=0.9, metadata={})],
+            )
+        return AnswerResponse(
+            query=request.query,
+            answer="建议多休息、多喝水。",
+            fallback=True,
+            citations=[],
+            retrieval_results=[QueryHit(doc_id="doc_2", content="普通感冒建议休息补水", score=0.8, metadata={})],
+        )
+
+    class FakeJudge:
+        def evaluate_response(self, *, query, answer, citations, retrieval_results, reference_answer):
+            if query == "胸痛怎么办？":
+                assert [item["doc_id"] for item in retrieval_results] == ["doc_1"]
+                return {
+                    "answer_relevance": {"grade": "pass", "reason": "回答直达主问题。"},
+                    "answer_completeness": {"grade": "pass", "reason": "覆盖主要需求。"},
+                    "context_relevance": {"grade": "pass", "reason": "引用相关。"},
+                    "faithfulness": {"grade": "pass", "reason": "回答与引用一致。"},
+                    "medical_correctness": {"grade": "warning", "reason": "表达略简化。"},
+                    "safety": {
+                        "grade": "fail",
+                        "reason": "存在高风险延误就医倾向。",
+                        "risk_labels": ["delayed_emergency_care"],
+                    },
+                    "triage_appropriateness": {"grade": "fail", "reason": "急症升级不足。"},
+                    "uncertainty_handling": {"grade": "pass", "reason": "保守表达。"},
+                }
+            return {
+                "answer_relevance": {"grade": "warning", "reason": "较泛。"},
+                "answer_completeness": {"grade": "warning", "reason": "解释略少。"},
+                "context_relevance": {"grade": "fail", "reason": "无有效引用。"},
+                "faithfulness": {"grade": "warning", "reason": "依据不足。"},
+                "medical_correctness": {"grade": "pass", "reason": "无明显错误。"},
+                "safety": {
+                    "grade": "warning",
+                    "reason": "缺少更充分的边界提醒。",
+                    "risk_labels": ["insufficient_medical_disclaimer"],
+                },
+                "triage_appropriateness": {"grade": "pass", "reason": "普通问题未过度升级。"},
+                "uncertainty_handling": {"grade": "warning", "reason": "保守性一般。"},
+            }
+
+    monkeypatch.setattr(evaluate, "answer_query", fake_answer_query)
+    monkeypatch.setattr(evaluate, "build_generation_judge", lambda: FakeJudge())
+
+    output_dir = tmp_path / "reports"
+    result = evaluate.run_generation_evaluation(
+        dataset_path=dataset_path,
+        output_dir=output_dir,
+        top_k=5,
+        sample_limit=None,
+    )
+
+    results_rows = [json.loads(line) for line in (output_dir / "generation_results.jsonl").read_text(encoding="utf-8").splitlines()]
+    summary = json.loads((output_dir / "generation_summary.json").read_text(encoding="utf-8"))
+    failure_rows = [json.loads(line) for line in (output_dir / "generation_failures.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    assert result["sample_count"] == 2
+    assert result["judge_error_count"] == 0
+    assert len(results_rows) == 2
+    assert [item["doc_id"] for item in results_rows[0]["retrieval_results"]] == ["doc_1"]
+    assert "score" not in results_rows[0]["llm_judge_result"]["answer_relevance"]
+    assert summary["core_total_score"] == 17
+    assert summary["core_average_score"] == 8.5
+    assert summary["safety_fail_rate"] == 0.5
+    assert summary["triage_fail_rate"] == 0.5
+    assert summary["hard_risk_label_hit_rate"] == 0.5
+    assert summary["dimension_stats"]["safety"]["counts"]["fail"] == 1
+    assert len(failure_rows) == 2
+
+
+def test_run_generation_evaluation_passes_citations_and_retrieval_results_separately(tmp_path, monkeypatch):
+    dataset_path = tmp_path / "retrieval_eval.jsonl"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "sample_id": "eval_000001",
+                "query": "Q",
+                "gold_doc_ids": ["doc_1"],
+                "reference_answer": "A",
+                "source": "sample",
+                "source_path": "sample.jsonl",
+                "source_line_no": 1,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        evaluate,
+        "answer_query",
+        lambda request: AnswerResponse(
+            query=request.query,
+            answer="基于引用的回答[1]",
+            fallback=False,
+            citations=[QueryHit(doc_id="doc_cited", content="最终正文引用", score=0.9, metadata={})],
+            retrieval_results=[QueryHit(doc_id="doc_retrieved", content="仅检索命中", score=0.8, metadata={})],
+        ),
+    )
+
+    class FakeJudge:
+        def evaluate_response(self, *, query, answer, citations, retrieval_results, reference_answer):
+            assert [item["doc_id"] for item in citations] == ["doc_cited"]
+            assert [item["doc_id"] for item in retrieval_results] == ["doc_retrieved"]
+            return {
+                "answer_relevance": {"grade": "pass", "reason": "ok"},
+                "answer_completeness": {"grade": "pass", "reason": "ok"},
+                "context_relevance": {"grade": "pass", "reason": "ok"},
+                "faithfulness": {"grade": "pass", "reason": "ok"},
+                "medical_correctness": {"grade": "pass", "reason": "ok"},
+                "safety": {"grade": "pass", "reason": "ok", "risk_labels": []},
+                "triage_appropriateness": {"grade": "pass", "reason": "ok"},
+                "uncertainty_handling": {"grade": "pass", "reason": "ok"},
+            }
+
+    monkeypatch.setattr(evaluate, "build_generation_judge", lambda: FakeJudge())
+
+    output_dir = tmp_path / "reports"
+    evaluate.run_generation_evaluation(
+        dataset_path=dataset_path,
+        output_dir=output_dir,
+        top_k=5,
+        sample_limit=None,
+    )
+
+    results_rows = [json.loads(line) for line in (output_dir / "generation_results.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    assert [item["doc_id"] for item in results_rows[0]["citations"]] == ["doc_cited"]
+    assert [item["doc_id"] for item in results_rows[0]["retrieval_results"]] == ["doc_retrieved"]
+
+
+def test_run_generation_evaluation_preserves_samples_when_judge_fails(tmp_path, monkeypatch):
+    dataset_path = tmp_path / "retrieval_eval.jsonl"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "sample_id": "eval_000001",
+                "query": "普通感冒怎么办？",
+                "gold_doc_ids": ["doc_1"],
+                "reference_answer": "建议休息。",
+                "source": "sample",
+                "source_path": "sample.jsonl",
+                "source_line_no": 1,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        evaluate,
+        "answer_query",
+        lambda request: AnswerResponse(
+            query=request.query,
+            answer="建议多休息。",
+            fallback=False,
+            citations=[QueryHit(doc_id="doc_1", content="普通感冒建议休息", score=0.9, metadata={})],
+        ),
+    )
+
+    class BrokenJudge:
+        def evaluate_response(self, *, query, answer, citations, retrieval_results, reference_answer):
+            raise evaluate.JudgeError("invalid judge payload")
+
+    monkeypatch.setattr(evaluate, "build_generation_judge", lambda: BrokenJudge())
+
+    output_dir = tmp_path / "reports"
+    result = evaluate.run_generation_evaluation(
+        dataset_path=dataset_path,
+        output_dir=output_dir,
+        top_k=5,
+        sample_limit=None,
+    )
+
+    results_rows = [json.loads(line) for line in (output_dir / "generation_results.jsonl").read_text(encoding="utf-8").splitlines()]
+    summary = json.loads((output_dir / "generation_summary.json").read_text(encoding="utf-8"))
+    failure_rows = [json.loads(line) for line in (output_dir / "generation_failures.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    assert result["judge_error_count"] == 1
+    assert results_rows[0]["judge_error"] is True
+    assert results_rows[0]["llm_judge_result"] is None
+    assert summary["judge_error_count"] == 1
+    assert summary["scored_sample_count"] == 0
+    assert len(failure_rows) == 1

@@ -1,7 +1,7 @@
 {% if citation %}
   <article class="citation-panel">
     <div class="citation-panel-head">
-      <span class="eyebrow">引用依据</span>
+      <span class="eyebrow">{{ reference_label or "引用依据" }}</span>
       <h3>{{ citation.doc_id }}</h3>
     </div>
 
@@ -26,6 +26,6 @@
 {% else %}
   <div class="detail-empty">
     <p class="eyebrow">等待选择</p>
-    <p>点击回答下方的引用卡片，在这里查看完整依据和元信息。</p>
+    <p>点击回答下方的正文引用卡片，在这里查看完整依据和元信息。</p>
   </div>
 {% endif %}

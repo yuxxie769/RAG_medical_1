@@ -306,5 +306,6 @@ def test_answer_inherits_rerank_metadata_from_query_results(monkeypatch):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["citations"][0]["metadata"]["rerank_score"] == 0.88
-    assert payload["citations"][0]["metadata"]["rerank_applied"] is True
+    assert payload["citations"] == []
+    assert payload["retrieval_results"][0]["metadata"]["rerank_score"] == 0.88
+    assert payload["retrieval_results"][0]["metadata"]["rerank_applied"] is True

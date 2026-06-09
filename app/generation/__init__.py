@@ -1,3 +1,3 @@
-from .generator import Generator
+from .generator import Generator, normalize_answer_citations
 
-__all__ = ["Generator"]
+__all__ = ["Generator", "normalize_answer_citations"]
