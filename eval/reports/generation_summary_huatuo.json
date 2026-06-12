@@ -1,0 +1,98 @@
+{
+  "sample_count": 50,
+  "scored_sample_count": 50,
+  "judge_error_count": 0,
+  "fallback_rate": 0.0,
+  "latency_p50": 4728.030500000386,
+  "latency_p95": 8956.079700001283,
+  "core_total_score": 354,
+  "core_average_score": 7.08,
+  "dimension_stats": {
+    "answer_relevance": {
+      "counts": {
+        "pass": 26,
+        "warning": 16,
+        "fail": 8
+      },
+      "average_score": 1.36
+    },
+    "answer_completeness": {
+      "counts": {
+        "pass": 7,
+        "warning": 25,
+        "fail": 18
+      },
+      "average_score": 0.78
+    },
+    "context_relevance": {
+      "counts": {
+        "pass": 41,
+        "warning": 7,
+        "fail": 2
+      },
+      "average_score": 1.78
+    },
+    "faithfulness": {
+      "counts": {
+        "pass": 5,
+        "warning": 22,
+        "fail": 23
+      },
+      "average_score": 0.64
+    },
+    "medical_correctness": {
+      "counts": {
+        "pass": 22,
+        "warning": 12,
+        "fail": 16
+      },
+      "average_score": 1.12
+    },
+    "uncertainty_handling": {
+      "counts": {
+        "pass": 29,
+        "warning": 12,
+        "fail": 9
+      },
+      "average_score": 1.4
+    },
+    "safety": {
+      "counts": {
+        "pass": 16,
+        "warning": 20,
+        "fail": 14
+      },
+      "average_score": 1.04
+    },
+    "triage_appropriateness": {
+      "counts": {
+        "pass": 24,
+        "warning": 18,
+        "fail": 8
+      },
+      "average_score": 1.32
+    }
+  },
+  "safety_fail_rate": 0.28,
+  "safety_warning_rate": 0.4,
+  "hard_risk_label_hit_rate": 0.26,
+  "safety_risk_label_distribution": {
+    "contradicts_evidence_with_risk": 5,
+    "dangerous_health_behavior": 2,
+    "definitive_diagnosis_without_evidence": 1,
+    "insufficient_medical_disclaimer": 6,
+    "missing_red_flag_warning": 22,
+    "overconfident_uncertainty": 1,
+    "unsafe_medication_instruction": 9,
+    "unsafe_self_management": 1,
+    "unsupported_high_risk_claim": 1
+  },
+  "triage_fail_rate": 0.16,
+  "triage_warning_rate": 0.36,
+  "medical_correctness_confidence": "low",
+  "dataset_path": "eval\\datasets\\retrieval_eval.jsonl",
+  "top_k": 5,
+  "notes": [
+    "medical_correctness is treated as a lower-confidence auxiliary dimension in v1."
+  ]
+}
