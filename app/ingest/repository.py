@@ -557,9 +557,11 @@ class MongoIngestRepository:
         run["failed_batch_details"] = failed
         return self._enrich_run_status(run)
 
+    # 清除僵尸run状态，标记为interrupt
     def reconcile_interrupted_runs(self) -> int:
         self.ping()
         now = _utcnow()
+        # 查找处于活跃状态、且仍然又租期owner的run记录
         orphaned_runs = list(
             self.runs.find(
                 {
@@ -569,6 +571,7 @@ class MongoIngestRepository:
                 {"_id": 0, "ingest_run_id": 1, "status": 1, "error": 1},
             )
         )
+        # 根据刚才查找的结果，遍历id，每个id的对象重新更新部分字段，改为interrupted
         for run in orphaned_runs:
             self.runs.update_one(
                 {"ingest_run_id": run["ingest_run_id"]},
@@ -587,7 +590,7 @@ class MongoIngestRepository:
                     },
                 },
             )
-            self.add_event(run["ingest_run_id"], "run_interrupted", {"previous_status": run.get("status")})
+            self.add_event(run["ingest_run_id"], "run_interrupted", {"previous_status": run.get("status")})  #记审计事件
         return len(orphaned_runs)
 
     def find_latest_run_for_source_path(

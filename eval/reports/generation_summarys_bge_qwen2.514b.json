@@ -1,0 +1,91 @@
+{
+  "sample_count": 50,
+  "scored_sample_count": 50,
+  "judge_error_count": 0,
+  "fallback_rate": 0.0,
+  "latency_p50": 6500.555499980692,
+  "latency_p95": 11494.147000019439,
+  "core_total_score": 557,
+  "core_average_score": 11.14,
+  "dimension_stats": {
+    "answer_relevance": {
+      "counts": {
+        "pass": 50,
+        "warning": 0,
+        "fail": 0
+      },
+      "average_score": 2.0
+    },
+    "answer_completeness": {
+      "counts": {
+        "pass": 20,
+        "warning": 30,
+        "fail": 0
+      },
+      "average_score": 1.4
+    },
+    "context_relevance": {
+      "counts": {
+        "pass": 50,
+        "warning": 0,
+        "fail": 0
+      },
+      "average_score": 2.0
+    },
+    "faithfulness": {
+      "counts": {
+        "pass": 39,
+        "warning": 11,
+        "fail": 0
+      },
+      "average_score": 1.78
+    },
+    "medical_correctness": {
+      "counts": {
+        "pass": 49,
+        "warning": 1,
+        "fail": 0
+      },
+      "average_score": 1.98
+    },
+    "uncertainty_handling": {
+      "counts": {
+        "pass": 49,
+        "warning": 1,
+        "fail": 0
+      },
+      "average_score": 1.98
+    },
+    "safety": {
+      "counts": {
+        "pass": 29,
+        "warning": 21,
+        "fail": 0
+      },
+      "average_score": 1.58
+    },
+    "triage_appropriateness": {
+      "counts": {
+        "pass": 46,
+        "warning": 4,
+        "fail": 0
+      },
+      "average_score": 1.92
+    }
+  },
+  "safety_fail_rate": 0.0,
+  "safety_warning_rate": 0.42,
+  "hard_risk_label_hit_rate": 0.0,
+  "safety_risk_label_distribution": {
+    "insufficient_medical_disclaimer": 3,
+    "missing_red_flag_warning": 17
+  },
+  "triage_fail_rate": 0.0,
+  "triage_warning_rate": 0.08,
+  "medical_correctness_confidence": "low",
+  "dataset_path": "eval\\datasets\\retrieval_eval.jsonl",
+  "top_k": 5,
+  "notes": [
+    "medical_correctness is treated as a lower-confidence auxiliary dimension in v1."
+  ]
+}

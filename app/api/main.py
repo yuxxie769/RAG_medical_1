@@ -248,7 +248,7 @@ def _get_ingest_repository() -> MongoIngestRepository:
         )
     return _DATASTORE["ingest_repository"]
 
-# 打包ingest相关的地址、indexer、batch size，为service对象
+# 获取ingest的service对象，包含数据层对象、indexer、batch size，
 def _get_ingest_service() -> IngestService:
     if _DATASTORE["ingest_service"] is None:
         _DATASTORE["ingest_service"] = IngestService(
@@ -258,7 +258,7 @@ def _get_ingest_service() -> IngestService:
         )
     return _DATASTORE["ingest_service"]
 
-# 打包 admin信息存储相关
+# 为admin数据层搭建一个TCP 连接池
 def _get_admin_repository() -> AdminRepository:
     if _DATASTORE["admin_repository"] is None:
         _DATASTORE["admin_repository"] = AdminRepository(
@@ -284,7 +284,7 @@ def _get_chat_service() -> ChatService:
         _DATASTORE["chat_service"] = ChatService(repository=_get_chat_repository())
     return _DATASTORE["chat_service"]
 
-
+# 获取admin数据层，初始化admin账号
 def _ensure_bootstrap_admin() -> None:
     if not settings.admin_bootstrap_username.strip() or not settings.admin_bootstrap_password:
         return
@@ -297,24 +297,24 @@ def _ensure_bootstrap_admin() -> None:
     except AdminAuthUnavailable as exc:
         logger.warning("Skipping bootstrap admin initialization: %s", exc)
 
-
+# 应用启动时清理旧进程残留的活跃 run，防止前端看到永远 "running" 的假象。
 def _reconcile_interrupted_runs() -> None:
     try:
         repository = _get_ingest_repository()
-        reconcile = getattr(repository, "reconcile_interrupted_runs", None)
+        reconcile = getattr(repository, "reconcile_interrupted_runs", None) #检查数据层对象有无reconcile_interrupted_runs这个方法
         if reconcile is None:
             return
-        reconciled = reconcile()
+        reconciled = reconcile() #执行reconcile_interrupted_runs方法
         if reconciled:
             logger.warning("Reconciled %s orphaned ingest runs into interrupted state", reconciled)
     except MongoUnavailable as exc:
         logger.warning("Skipping ingest run reconciliation: %s", exc)
 
-
+# admin 认证
 def _authenticate_admin_cookie(cookie_value: str | None) -> dict:
     try:
-        username_normalized = read_admin_session_value(settings.admin_session_secret, cookie_value)
-        admin_user = _get_admin_repository().get_active_user(username_normalized)
+        username_normalized = read_admin_session_value(settings.admin_session_secret, cookie_value) #利用私钥admin_session_secret，检查用户的cookie签名
+        admin_user = _get_admin_repository().get_active_user(username_normalized) # 拿解析出的用户名去 admin_users 集合里查这个人还在不在、是否 is_active=True
     except AdminSessionError as exc:
         raise PermissionError(str(exc)) from exc
     except AdminAuthUnavailable:
@@ -323,7 +323,7 @@ def _authenticate_admin_cookie(cookie_value: str | None) -> dict:
         raise PermissionError("Admin authentication required.")
     return admin_user
 
-
+# admin 认证包装
 def _require_admin_api(request: Request) -> dict:
     try:
         return _authenticate_admin_cookie(request.cookies.get(ADMIN_COOKIE_NAME))
@@ -332,7 +332,7 @@ def _require_admin_api(request: Request) -> dict:
     except AdminAuthUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-
+# 检查milvus是否有数据
 def _ensure_indexed_store() -> MilvusStore:
     store = _get_store()
     try:
@@ -345,7 +345,7 @@ def _ensure_indexed_store() -> MilvusStore:
         raise HTTPException(status_code=400, detail="No documents indexed yet. Call /ingest first.")
     return store
 
-
+# ingest response格式转换组装函数（dict-》pydantic）
 def _to_ingest_status_response(state: dict) -> IngestStatusResponse:
     return IngestStatusResponse(
         ingest_run_id=state["ingest_run_id"],
@@ -381,19 +381,23 @@ def _to_ingest_status_response(state: dict) -> IngestStatusResponse:
     )
 
 
+# run ingest 方法
 def _run_ingest_background(prepared_run) -> None:
     try:
         _get_ingest_service().execute_prepared_ingest(prepared_run)
     except Exception:
         logger.exception("Background ingest execution failed run_id=%s", prepared_run.ingest_run_id)
 
-
+#格式化字典为json，并适配sse格式
 def _format_sse(event: str, data: dict | None = None) -> str:
     if data is None:
         return f"event: {event}\n\n"
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+#########################################路由部分###############################################
+
+# 服务启动后，自动初始化管理员账号 + 修复遗留异常任务
 @app.on_event("startup")
 def bootstrap_admin_user() -> None:
     _ensure_bootstrap_admin()
@@ -403,25 +407,28 @@ def bootstrap_admin_user() -> None:
 @app.get("/health")
 def health_check() -> dict:
     try:
-        _get_ingest_repository().ping()
+        _get_ingest_repository().ping() # ① 检查 MongoDB TCP 连通性
         mongodb_status = "ok"
     except MongoUnavailable:
         mongodb_status = "unavailable"
     return {"status": "ok", "project": settings.project_name, "mongodb": mongodb_status}
 
 
+# ingest路由，输入IngestRequest，输出IngestAcceptedResponse
 @app.post("/ingest", response_model=IngestAcceptedResponse, status_code=202)
 def ingest_data(
     request: IngestRequest,
-    background_tasks: BackgroundTasks,
-    _: dict = Depends(_require_admin_api),
+    background_tasks: BackgroundTasks, #FastAPI 内置后台任务实例，用于注册为后台任务
+    _: dict = Depends(_require_admin_api), # 依赖注入：必须先认证
 ) -> IngestAcceptedResponse:
     try:
+        # 准备ingest任务，校验路径 + 找/建 run + 拿租约
         prepared_run = _get_ingest_service().prepare_ingest(
-            **request.model_dump(),
-            target_collection_name=settings.milvus_collection_name,
+            **request.model_dump(), #注入请求参数
+            target_collection_name=settings.milvus_collection_name, # 额外注入目标collection名
         )
-        background_tasks.add_task(_run_ingest_background, prepared_run)
+        #把 prepare_ingest 返回的 PreparedIngestRun 作为参数，_run_ingest_background作为运行体，后台添加运行任务
+        background_tasks.add_task(_run_ingest_background, prepared_run) 
         return IngestAcceptedResponse(
             status="queued",
             ingest_run_id=prepared_run.ingest_run_id,
@@ -437,7 +444,7 @@ def ingest_data(
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-
+# 获取run任务状态
 @app.get("/ingest/status", response_model=IngestStatusResponse)
 def ingest_status(ingest_run_id: str, _: dict = Depends(_require_admin_api)) -> IngestStatusResponse:
     try:
@@ -459,22 +466,26 @@ def cancel_ingest(ingest_run_id: str, _: dict = Depends(_require_admin_api)) -> 
         raise HTTPException(status_code=404, detail=f"Ingest run not found: {ingest_run_id}")
     return _to_ingest_status_response(state)
 
-
+# SSE 实时进度流接口，输出StreamingResponse
 @app.get("/ingest/{ingest_run_id}/events")
 def ingest_events(ingest_run_id: str, _: dict = Depends(_require_admin_api)) -> StreamingResponse:
     try:
-        initial_state = _get_ingest_repository().get_status(ingest_run_id)
+        initial_state = _get_ingest_repository().get_status(ingest_run_id) # 先查一次 run 是否存在与数据库。不存在 → 404，MongoDB 挂了 → 503。
     except MongoUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if initial_state is None:
         raise HTTPException(status_code=404, detail=f"Ingest run not found: {ingest_run_id}")
 
+    # 每隔 1 秒轮询 MongoDB（ingest数据层），比较 updated_at 是否有变化。
     def event_stream():
         last_updated_at = None
-        last_heartbeat = time.monotonic()
+        last_heartbeat = time.monotonic() #开始计时
         while True:
+            # 再查 run 当前状态
             try:
-                state = _get_ingest_repository().get_status(ingest_run_id)
+                state = _get_ingest_repository().get_status(ingest_run_id) 
+            
+            # 分支1：MongoDB 挂了
             except MongoUnavailable as exc:
                 payload = {
                     "ingest_run_id": ingest_run_id,
@@ -487,18 +498,21 @@ def ingest_events(ingest_run_id: str, _: dict = Depends(_require_admin_api)) -> 
                 yield _format_sse("error", IngestStatusResponse(**payload).model_dump(mode="json"))
                 logger.exception("SSE progress stream failed run_id=%s error=%s", ingest_run_id, exc)
                 break
-
+            # 分支2：run 被删了，没有数据
             if state is None:
                 break
 
             status_response = _to_ingest_status_response(state)
             updated_at = state.get("updated_at")
+
+            #分支3：updated_at 变化，推送json
             if last_updated_at is None or updated_at != last_updated_at:
-                yield _format_sse("progress", status_response.model_dump(mode="json"))
+                yield _format_sse("progress", status_response.model_dump(mode="json")) #格式化拼接成 SSE（服务器推送事件）标准报文。
                 last_updated_at = updated_at
                 last_heartbeat = time.monotonic()
-                if status_response.status not in ACTIVE_RUN_STATUSES:
+                if status_response.status not in ACTIVE_RUN_STATUSES: #当run状态进入completed / failed / cancelled ，结束sse推送
                     break
+            #分支4：15 秒无变化，推送心跳保活防断连
             elif time.monotonic() - last_heartbeat >= 15:
                 yield ": heartbeat\n\n"
                 last_heartbeat = time.monotonic()
@@ -507,10 +521,10 @@ def ingest_events(ingest_run_id: str, _: dict = Depends(_require_admin_api)) -> 
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-
+# 查询，无生成
 @app.post("/query", response_model=QueryResponse)
 def query_documents(request: QueryRequest) -> QueryResponse:
-    resolved_fetch_k = max(request.fetch_k or settings.fetch_k, request.top_k, settings.rerank_candidate_limit)
+    resolved_fetch_k = max(request.fetch_k or settings.fetch_k, request.top_k, settings.rerank_candidate_limit) #fetch_k 取三者最大值
     resolved_min_score = settings.min_score if request.min_score is None else request.min_score
     _ensure_indexed_store()
     try:
@@ -531,18 +545,19 @@ def query_documents(request: QueryRequest) -> QueryResponse:
         min_score=resolved_min_score,
         hits=[
             QueryHit(doc_id=item.doc_id, content=item.content, score=item.score, metadata=item.metadata)
-            for item in results
+            for item in results #遍历返回召回结果
         ],
     )
 
-
+#查询，有生成
 @app.post("/answer", response_model=AnswerResponse)
 def answer_query(request: AnswerRequest) -> AnswerResponse:
-    query_response = query_documents(QueryRequest(query=request.query, top_k=request.top_k))
+    query_response = query_documents(QueryRequest(query=request.query, top_k=request.top_k))  # 执行召回
     retrieval_results = [
         RetrievalResult(doc_id=item.doc_id, content=item.content, score=item.score, metadata=item.metadata)
         for item in query_response.hits
     ]
+    #无结果的情况
     if not retrieval_results:
         return AnswerResponse(
             query=request.query,
@@ -551,8 +566,11 @@ def answer_query(request: AnswerRequest) -> AnswerResponse:
             citations=[],
             retrieval_results=[],
         )
+    #有召回结果的情况，generator生成
     generation_result = _get_generator().generate(request.query, retrieval_results)
+    #把 LLM 生成答案里的引用编号重新编排，返回整理好后的答案+citations
     normalized_answer, cited_results = normalize_answer_citations(generation_result.answer, retrieval_results)
+    # 返回召回结果+citations
     return AnswerResponse(
         query=request.query,
         answer=normalized_answer,
@@ -570,5 +588,5 @@ def answer_query(request: AnswerRequest) -> AnswerResponse:
 
 from app.web import mount_web
 
-
+# 挂载其他前端页面路由到app main文件
 mount_web(app)

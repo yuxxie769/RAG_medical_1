@@ -1,10 +1,20 @@
 import json
 
+import pytest
+
 from app.api.main import AnswerResponse, QueryHit, QueryResponse
 from app.data.cleaner import clean_records
 from app.kb.builder import build_documents
 from app.retrieval import InMemoryMilvusStore, MilvusCollectionSchema, build_records
 from scripts import evaluate
+
+
+class StaticRewriter:
+    def __init__(self, rewrites_by_query):
+        self.rewrites_by_query = rewrites_by_query
+
+    def rewrite_queries(self, query, rewrite_count):
+        return self.rewrites_by_query[query]
 
 
 def test_iter_export_rows_reads_expected_fields():
@@ -138,6 +148,11 @@ def test_build_retrieval_set_writes_dataset_and_discard_logs(tmp_path, monkeypat
             ]
 
     monkeypatch.setattr(evaluate, "build_store", lambda collection: FakeStore())
+    monkeypatch.setattr(
+        evaluate,
+        "build_query_rewriter",
+        lambda: StaticRewriter({"Q1": ["Q1改写1", "Q1改写2", "Q1改写3"]}),
+    )
 
     output_path = tmp_path / "retrieval_eval.jsonl"
     result = evaluate.build_retrieval_set(
@@ -154,11 +169,149 @@ def test_build_retrieval_set_writes_dataset_and_discard_logs(tmp_path, monkeypat
     assert result["sample_count"] == 1
     assert result["discarded_count"] == 1
     assert result["candidate_group_count"] == 2
+    assert result["rewrite_count"] == 3
     assert dataset_rows[0]["query"] == "Q1"
+    assert dataset_rows[0]["rewritten_queries"] == ["Q1改写1", "Q1改写2", "Q1改写3"]
     assert discarded_rows[0]["query"] == "Q2"
 
 
+@pytest.mark.parametrize(
+    "bad_rewrites, expected_message",
+    [
+        (["重复问法", "重复问法", "另一个问法"], "Expected 3 unique rewritten queries"),
+        (["", "问法2", "问法3"], "Rewritten queries must not be empty"),
+        (["只有一个", "只有两个"], "Expected 3 unique rewritten queries"),
+    ],
+)
+def test_build_retrieval_set_fails_when_rewritten_queries_invalid(tmp_path, monkeypatch, bad_rewrites, expected_message):
+    source_path = tmp_path / "samples.jsonl"
+    source_path.write_text(
+        json.dumps({"question": "Q1", "answer": "完整答案1"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    rows = [
+        evaluate.MilvusExportRow(
+            doc_id="doc_1",
+            question="Q1",
+            answer="完整答案1",
+            source=str(source_path),
+            source_path=str(source_path),
+            source_line_no=1,
+        )
+    ]
+
+    class FakeStore:
+        def iter_export_rows(self):
+            return iter(rows)
+
+        def export_rows_for_group(self, *, source_path, source_line_no, question):
+            return list(rows)
+
+    monkeypatch.setattr(evaluate, "build_store", lambda collection: FakeStore())
+    monkeypatch.setattr(
+        evaluate,
+        "build_query_rewriter",
+        lambda: StaticRewriter({"Q1": bad_rewrites}),
+    )
+
+    with pytest.raises(evaluate.QueryRewriteError, match=expected_message):
+        evaluate.build_retrieval_set(
+            collection="test_collection",
+            sample_size=10,
+            seed=1,
+            output_path=tmp_path / "retrieval_eval.jsonl",
+        )
+
+
+def test_parse_rewritten_queries_content_rejects_non_structured_response():
+    with pytest.raises(evaluate.QueryRewriteError, match="does not contain a JSON object or array"):
+        evaluate._parse_rewritten_queries_content(
+            content="这不是结构化返回",
+            original_query="Q1",
+            rewrite_count=3,
+        )
+
+
 def test_run_retrieval_evaluation_supports_multiple_gold_doc_ids(tmp_path, monkeypatch):
+    dataset_path = tmp_path / "retrieval_eval.jsonl"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "sample_id": "eval_000001",
+                "query": "Q",
+                "rewritten_queries": ["Q改写1", "Q改写2", "Q改写3"],
+                "gold_doc_ids": ["doc_2", "doc_3"],
+                "reference_answer": "A",
+                "source": "sample",
+                "source_path": "sample.jsonl",
+                "source_line_no": 1,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    seen_queries = []
+
+    def fake_query_documents(request):
+        seen_queries.append((request.search_method, request.query))
+        hits_by_method_and_query = {
+            ("dense", "Q改写1"): [QueryHit(doc_id="doc_x", content="x", score=0.9, metadata={})],
+            ("dense", "Q改写2"): [
+                QueryHit(doc_id="doc_x", content="x", score=0.9, metadata={}),
+                QueryHit(doc_id="doc_3", content="y", score=0.8, metadata={}),
+            ],
+            ("dense", "Q改写3"): [QueryHit(doc_id="doc_2", content="z", score=0.7, metadata={})],
+            ("sparse", "Q改写1"): [QueryHit(doc_id="doc_none", content="z", score=0.7, metadata={})],
+            ("sparse", "Q改写2"): [QueryHit(doc_id="doc_2", content="h", score=0.95, metadata={})],
+            ("sparse", "Q改写3"): [QueryHit(doc_id="doc_none2", content="k", score=0.5, metadata={})],
+            ("hybrid", "Q改写1"): [QueryHit(doc_id="doc_2", content="h", score=0.95, metadata={})],
+            ("hybrid", "Q改写2"): [QueryHit(doc_id="doc_none", content="m", score=0.4, metadata={})],
+            ("hybrid", "Q改写3"): [QueryHit(doc_id="doc_3", content="n", score=0.3, metadata={})],
+        }
+        return QueryResponse(
+            query=request.query,
+            search_method=request.search_method,
+            top_k=request.top_k,
+            fetch_k=request.fetch_k or request.top_k,
+            min_score=0.0,
+            hits=hits_by_method_and_query[(request.search_method, request.query)],
+        )
+
+    monkeypatch.setattr(evaluate, "query_documents", fake_query_documents)
+
+    output_dir = tmp_path / "reports"
+    result = evaluate.run_retrieval_evaluation(
+        dataset_path=dataset_path,
+        search_method="all",
+        top_k=10,
+        fetch_k=10,
+        output_dir=output_dir,
+    )
+
+    summary = json.loads((output_dir / "retrieval_summary.json").read_text(encoding="utf-8"))
+    failures = [json.loads(line) for line in (output_dir / "retrieval_failures.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    assert result["method_count"] == 3
+    assert summary["sample_count"] == 1
+    assert summary["evaluation_query_count"] == 3
+    assert summary["rewrite_count_per_sample"] == 3
+    assert summary["rewritten_query_mode"] == "dataset_precomputed"
+    assert summary["methods"]["dense"]["evaluation_query_count"] == 3
+    assert summary["methods"]["dense"]["recall_at_10"] == pytest.approx(2 / 3)
+    assert summary["methods"]["dense"]["mrr"] == pytest.approx(0.5)
+    assert summary["methods"]["sparse"]["recall_at_10"] == pytest.approx(1 / 3)
+    assert summary["methods"]["hybrid"]["recall_at_10"] == pytest.approx(2 / 3)
+    assert len(seen_queries) == 9
+    assert len(failures) == 4
+    assert failures[0]["search_method"] == "dense"
+    assert failures[0]["original_query"] == "Q"
+    assert failures[0]["rewritten_query"] == "Q改写1"
+    assert failures[0]["rewrite_index"] == 1
+
+
+def test_run_retrieval_evaluation_rejects_legacy_dataset_without_rewritten_queries(tmp_path):
     dataset_path = tmp_path / "retrieval_eval.jsonl"
     dataset_path.write_text(
         json.dumps(
@@ -177,49 +330,14 @@ def test_run_retrieval_evaluation_supports_multiple_gold_doc_ids(tmp_path, monke
         encoding="utf-8",
     )
 
-    def fake_query_documents(request):
-        hits_by_method = {
-            "dense": [
-                QueryHit(doc_id="doc_x", content="x", score=0.9, metadata={}),
-                QueryHit(doc_id="doc_3", content="y", score=0.8, metadata={}),
-            ],
-            "sparse": [
-                QueryHit(doc_id="doc_none", content="z", score=0.7, metadata={}),
-            ],
-            "hybrid": [
-                QueryHit(doc_id="doc_2", content="h", score=0.95, metadata={}),
-            ],
-        }
-        return QueryResponse(
-            query=request.query,
-            search_method=request.search_method,
-            top_k=request.top_k,
-            fetch_k=request.fetch_k or request.top_k,
-            min_score=0.0,
-            hits=hits_by_method[request.search_method],
+    with pytest.raises(ValueError, match="missing valid rewritten_queries"):
+        evaluate.run_retrieval_evaluation(
+            dataset_path=dataset_path,
+            search_method="all",
+            top_k=10,
+            fetch_k=10,
+            output_dir=tmp_path / "reports",
         )
-
-    monkeypatch.setattr(evaluate, "query_documents", fake_query_documents)
-
-    output_dir = tmp_path / "reports"
-    result = evaluate.run_retrieval_evaluation(
-        dataset_path=dataset_path,
-        search_method="all",
-        top_k=10,
-        fetch_k=10,
-        output_dir=output_dir,
-    )
-
-    summary = json.loads((output_dir / "retrieval_summary.json").read_text(encoding="utf-8"))
-    failures = [json.loads(line) for line in (output_dir / "retrieval_failures.jsonl").read_text(encoding="utf-8").splitlines()]
-
-    assert result["method_count"] == 3
-    assert summary["methods"]["dense"]["recall_at_10"] == 1.0
-    assert summary["methods"]["dense"]["mrr"] == 0.5
-    assert summary["methods"]["sparse"]["recall_at_10"] == 0.0
-    assert summary["methods"]["hybrid"]["recall_at_10"] == 1.0
-    assert len(failures) == 1
-    assert failures[0]["search_method"] == "sparse"
 
 
 def test_run_generation_evaluation_writes_results_summary_and_failures(tmp_path, monkeypatch):

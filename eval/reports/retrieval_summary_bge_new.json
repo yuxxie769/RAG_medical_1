@@ -1,0 +1,41 @@
+{
+  "dataset_path": "eval\\datasets\\retrieval_eval_500.jsonl",
+  "top_k": 10,
+  "fetch_k": 15,
+  "sample_count": 500,
+  "evaluation_query_count": 1500,
+  "rewrite_count_per_sample": 3,
+  "rewritten_query_mode": "dataset_precomputed",
+  "methods": {
+    "dense": {
+      "sample_count": 500,
+      "evaluation_query_count": 1500,
+      "recall_at_5": 0.8633333333333333,
+      "recall_at_10": 0.9246666666666666,
+      "mrr": 0.6673616402116415,
+      "latency_p50": 0.04546440000194707,
+      "latency_p95": 0.06403490000229795,
+      "meets_recall_at_10_target": true
+    },
+    "sparse": {
+      "sample_count": 500,
+      "evaluation_query_count": 1500,
+      "recall_at_5": 0.454,
+      "recall_at_10": 0.5606666666666666,
+      "mrr": 0.328134656084656,
+      "latency_p50": 0.006789350001781713,
+      "latency_p95": 0.009328399995865766,
+      "meets_recall_at_10_target": false
+    },
+    "hybrid": {
+      "sample_count": 500,
+      "evaluation_query_count": 1500,
+      "recall_at_5": 0.794,
+      "recall_at_10": 0.8906666666666667,
+      "mrr": 0.5804187830687841,
+      "latency_p50": 0.04654129999471479,
+      "latency_p95": 0.06466509999881964,
+      "meets_recall_at_10_target": true
+    }
+  }
+}
