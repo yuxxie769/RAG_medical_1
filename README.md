@@ -39,7 +39,19 @@ uv sync
 
 ### 2. 准备配置
 
-以 `.env.example` 为参考，在项目根目录准备 `.env`。
+在项目根目录从模板创建本地配置文件：
+
+```bash
+cp .env.example .env
+```
+
+`.env` 只用于本机或部署环境，已被 Git 忽略。不要提交它，也不要将其中的 API key、密码、连接串或 session secret 粘贴到 Issue、PR、日志或聊天记录中。生产环境应通过部署平台的 Secret 管理或环境变量注入这些值。
+
+为管理员会话设置随机且独立的 `ADMIN_SESSION_SECRET`，例如：
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
 
 最少需要确认这些配置：
 
@@ -63,7 +75,7 @@ uv run uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
 
 ## 配置项说明
 
-`README` 只保留配置分组和用途说明，完整字段见 [.env.example](C:/Users/xieyuxiang/Documents/RAG_medical/.env.example)。
+`README` 只保留配置分组和用途说明，完整字段见 [.env.example](.env.example)。模板中的密钥和密码字段必须保持为空；填写真实值后只能保存在本地 `.env` 或部署平台的 Secret 管理中。
 
 ### 1. 项目与默认检索参数
 
